@@ -12,6 +12,7 @@ from app.agent.graph import build_graph
 from app.models.thread import Thread
 from app.models.user import User
 from app.schemas.chat import ChatResponse
+from app.services.approvals import persist_pending_approval
 
 _GRAPH = build_graph()
 
@@ -61,6 +62,22 @@ async def process_chat_message(
         graph_input,
         config={"configurable": {"thread_id": resolved_thread_id, "user_id": current_user.id}},
     )
+
+    approval_request = graph_result.get("approval_request")
+    if approval_request and approval_request.get("required"):
+        tool_name = approval_request.get("tool_name")
+        if tool_name:
+            approval = await persist_pending_approval(
+                session,
+                user_id=current_user.id,
+                thread_id=resolved_thread_id,
+                tool_name=tool_name,
+                action_args=approval_request.get("action_args") or {"prompt": message},
+            )
+            await session.commit()
+            approval_request["approval_id"] = approval.id
+            approval_request["status"] = approval.status
+            graph_result["approval_request"] = approval_request
 
     return ChatResponse(
         thread_id=str(graph_result.get("thread_id") or resolved_thread_id),

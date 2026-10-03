@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.database import Base
 
 if TYPE_CHECKING:
+    from .approval import ApprovalRequest
     from .audit_log import AuditLog
     from .document import Document
     from .email_message import EmailMessage
@@ -63,6 +64,14 @@ class User(Base):
     audit_logs: Mapped[list["AuditLog"]] = relationship(
         back_populates="user",
         foreign_keys="AuditLog.user_id",
+    )
+    approval_requests: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="requester",
+        foreign_keys="ApprovalRequest.user_id",
+    )
+    approval_decisions: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="decision_maker",
+        foreign_keys="ApprovalRequest.decision_made_by",
     )
     threads: Mapped[list["Thread"]] = relationship(
         back_populates="owner",

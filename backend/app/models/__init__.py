@@ -1,5 +1,6 @@
 """Database models package."""
 
+from .approval import ApprovalRequest
 from .audit_log import AuditLog
 from .document import Document
 from .document_chunk import DocumentChunk
@@ -11,6 +12,7 @@ from .user import User
 from .user_capability import UserCapability
 
 __all__ = [
+    "ApprovalRequest",
     "AuditLog",
     "Document",
     "DocumentChunk",

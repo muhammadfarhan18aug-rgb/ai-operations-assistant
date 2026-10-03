@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from .approval import ApprovalRequest
     from .audit_log import AuditLog
     from .user import User
 
@@ -34,4 +35,8 @@ class Thread(Base):
     audit_logs: Mapped[list["AuditLog"]] = relationship(
         back_populates="thread",
         foreign_keys="AuditLog.thread_id",
+    )
+    approvals: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="thread",
+        foreign_keys="ApprovalRequest.thread_id",
     )

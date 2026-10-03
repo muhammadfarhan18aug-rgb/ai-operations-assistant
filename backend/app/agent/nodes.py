@@ -7,6 +7,7 @@ from typing import Any
 from app.agent.state import GraphState
 from app.database import get_db_session
 from app.policies.retrieval import retrieve_policy_context
+from app.services.approvals import requires_human_approval, _extract_tool_args
 
 
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
@@ -79,10 +80,6 @@ def action_node(state: GraphState) -> GraphState:
         tool_name = "inventory_lookup"
 
     state["intent"] = "action"
-    state["response"] = (
-        "This request was classified as an operational action, but tool execution remains gated by the "
-        "backend authorization boundary in this foundation step."
-    )
     state["citations"] = []
     state["action_request"] = {
         "kind": "explicit_tool_selection",
@@ -90,10 +87,32 @@ def action_node(state: GraphState) -> GraphState:
         "status": "pending_authorization",
         "tool_name": tool_name,
     }
-    state["approval_request"] = {
-        "required": True,
-        "reason": "Tool execution is intentionally blocked until the backend authorization boundary approves it.",
-    }
+
+    requires_approval = requires_human_approval(tool_name)
+    if requires_approval:
+        state["response"] = (
+            "Human approval is required before the dangerous write action can execute. "
+            "The backend is creating a durable approval record for this request."
+        )
+        state["approval_request"] = {
+            "required": True,
+            "tool_name": tool_name,
+            "status": "pending",
+            "action_args": _extract_tool_args(tool_name, request_text),
+            "reason": "Responsible backend policy requires explicit human approval before a write action executes.",
+        }
+    else:
+        state["response"] = (
+            "This request was classified as an operational action, but tool execution remains gated by the "
+            "backend authorization boundary in this foundation step."
+        )
+        state["approval_request"] = {
+            "required": False,
+            "tool_name": tool_name,
+            "status": "not_required",
+            "action_args": {},
+            "reason": "Read-only tool or policy lookup does not require human approval.",
+        }
     state["error"] = None
     return state
 
