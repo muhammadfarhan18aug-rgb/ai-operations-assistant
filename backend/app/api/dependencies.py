@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,18 +12,19 @@ from app.services.auth import decode_access_token
 
 
 async def get_current_user(
+    request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
+    access_token: str | None = Cookie(default=None, alias="access_token"),
     session: AsyncSession = Depends(get_db_session),
 ) -> User:
-    """Validate a bearer token and return the active authenticated database user."""
-    if authorization is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
+    """Validate a JWT from the HttpOnly cookie or the Authorization header and return the active user."""
+    token = access_token
+    if token is None and authorization is not None:
+        scheme, _, header_token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and header_token:
+            token = header_token
 
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    if token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required.",

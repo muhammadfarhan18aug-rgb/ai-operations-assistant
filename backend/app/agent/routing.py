@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.agent.state import GraphState
@@ -26,6 +27,9 @@ def route_message(state: GraphState) -> str:
         return "unknown"
 
     normalized = latest_text.lower()
+
+    if re.search(r"\b(?:check|lookup|look up|show)\s+(?:the\s+)?(?:inventory|stock)\b", normalized):
+        return "action"
 
     action_keywords = (
         "create",

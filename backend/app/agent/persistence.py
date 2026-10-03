@@ -53,16 +53,27 @@ async def create_postgres_checkpointer(conn_string: str | None = None) -> AsyncP
 
 
 def create_default_checkpointer() -> AsyncPostgresSaver | None:
-    """Return a connected Postgres checkpointer when the database is reachable."""
+    """Return a connected Postgres checkpointer when the database is reachable.
+
+    Avoid creating a saver from an already-running event loop. AsyncPostgresSaver binds to a
+    specific loop, and creating it with asyncio.run() inside an ASGI request lifecycle can leave
+    the saver bound to a closed loop and break later async graph execution.
+    """
     _configure_windows_event_loop()
     try:
-        return asyncio.run(create_postgres_checkpointer())
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(create_postgres_checkpointer())
-        finally:
-            loop.close()
-    except Exception:
-        logger.warning("Unable to create the default Postgres checkpointer.", exc_info=True)
-        return None
+            return asyncio.run(create_postgres_checkpointer())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(create_postgres_checkpointer())
+            finally:
+                loop.close()
+        except Exception:
+            logger.warning("Unable to create the default Postgres checkpointer.", exc_info=True)
+            return None
+
+    logger.info("Skipping Postgres checkpointer initialization because the app is already running in an active async loop.")
+    return None

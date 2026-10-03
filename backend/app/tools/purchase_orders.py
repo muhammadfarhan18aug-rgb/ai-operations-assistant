@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
@@ -27,7 +27,7 @@ class PurchaseOrderCreateInput(BaseModel):
     @field_validator("sku")
     @classmethod
     def validate_sku(cls, value: str) -> str:
-        cleaned = value.strip()
+        cleaned = value.strip().upper()
         if not cleaned or not all(ch.isalnum() or ch in "-_" for ch in cleaned):
             raise ValueError("SKU must contain only letters, numbers, dashes, or underscores.")
         return cleaned
@@ -58,6 +58,8 @@ async def create_purchase_order(
             idempotency_key=idempotency_key,
         )
 
+    data.sku = data.sku.upper()
+
     user = await authorize_tool(session, context, "order:create")
 
     existing = await session.execute(
@@ -75,17 +77,20 @@ async def create_purchase_order(
             "status": "duplicate",
         }
 
-    product = await session.execute(select(Product).where(Product.sku == data.sku).limit(1))
+    product = await session.execute(select(Product).where(func.lower(Product.sku) == data.sku.lower()).limit(1))
     product_record = product.scalar_one_or_none()
     if product_record is None:
         raise ToolNotFoundError(f"Product '{data.sku}' was not found.")
 
-    thread = await ensure_thread_for_context(session, context, user.id, f"Purchase order for {data.sku}")
+    resolved_sku = product_record.sku
+    data.sku = resolved_sku
+
+    thread = await ensure_thread_for_context(session, context, user.id, f"Purchase order for {resolved_sku}")
 
     order_reference = f"PO-{uuid4().hex[:12].upper()}"
     order = Order(
         order_reference=order_reference,
-        sku=data.sku,
+        sku=resolved_sku,
         quantity=data.quantity,
         supplier=data.supplier,
         requested_by=user.id,
@@ -98,7 +103,7 @@ async def create_purchase_order(
         user_id=user.id,
         tool="purchase_order_create",
         arguments={
-            "sku": data.sku,
+            "sku": resolved_sku,
             "quantity": data.quantity,
             "supplier": data.supplier,
             "idempotency_key": data.idempotency_key,
@@ -112,7 +117,7 @@ async def create_purchase_order(
 
     return {
         "order_reference": order_reference,
-        "sku": data.sku,
+        "sku": resolved_sku,
         "quantity": int(data.quantity),
         "supplier": data.supplier,
         "requested_by": user.id,

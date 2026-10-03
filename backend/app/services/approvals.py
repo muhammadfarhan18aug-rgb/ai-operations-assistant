@@ -46,7 +46,9 @@ def _extract_tool_args(tool_name: str, request_text: str) -> dict[str, Any]:
         return {}
 
     if tool_name == "purchase_order_create":
-        sku = _find_value(r"(?i)(?:sku|product|item)\s*[:=]?\s*([A-Za-z0-9_-]+)", normalized)
+        sku = _find_value(r"(?i)\b(SKU[-_][A-Za-z0-9_-]+)\b", normalized)
+        if not sku:
+            sku = _find_value(r"(?i)\b(?:sku|product|item)\b\s*[:=]?\s*([A-Za-z0-9_-]+)", normalized)
         quantity = _find_value(r"(?i)(?:qty|quantity)\s*[:=]?\s*(\d+)", normalized)
         supplier = _find_value(r"(?i)(?:supplier|vendor|from)\s*[:=]?\s*([A-Za-z0-9 .&'-]+)", normalized)
         args: dict[str, Any] = {}
@@ -55,7 +57,7 @@ def _extract_tool_args(tool_name: str, request_text: str) -> dict[str, Any]:
         if quantity:
             args["quantity"] = int(quantity)
         if supplier:
-            args["supplier"] = supplier.strip()
+            args["supplier"] = supplier.strip().rstrip(".")
         if not args:
             args["prompt"] = normalized
         return args
@@ -165,10 +167,43 @@ async def approve_approval_request(
     current_user: User,
     approval_id: int,
     reason: str | None = None,
+    action_args: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
     approval = await get_owned_approval(session, user_id=current_user.id, approval_id=approval_id)
     if approval.status not in {"PENDING", "APPROVED"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval is not pending and cannot be executed.")
+
+    if approval.expires_at and approval.expires_at <= datetime.now(timezone.utc):
+        approval.status = "EXPIRED"
+        approval.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval request has expired.")
+
+    if action_args is not None:
+        approval.action_args = _sanitize_action_args(action_args)
+
+    if approval.tool_name == "purchase_order_create":
+        if "sku" not in approval.action_args or "quantity" not in approval.action_args or "supplier" not in approval.action_args:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Edited order arguments are incomplete.")
+        from app.tools.purchase_orders import PurchaseOrderCreateInput
+
+        PurchaseOrderCreateInput(
+            sku=str(approval.action_args["sku"]),
+            quantity=int(approval.action_args["quantity"]),
+            supplier=str(approval.action_args["supplier"]),
+            idempotency_key=str(approval.idempotency_key),
+        )
+    elif approval.tool_name == "email_send":
+        if "recipient" not in approval.action_args or "subject" not in approval.action_args or "body" not in approval.action_args:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Edited email arguments are incomplete.")
+        from app.tools.email import EmailSendInput
+
+        EmailSendInput(
+            recipient=str(approval.action_args["recipient"]),
+            subject=str(approval.action_args["subject"]),
+            body=str(approval.action_args["body"]),
+            idempotency_key=str(approval.idempotency_key),
+        )
 
     if approval.status == "PENDING":
         approval.status = "APPROVED"

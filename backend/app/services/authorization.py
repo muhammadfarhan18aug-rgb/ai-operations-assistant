@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_current_user
 from app.database import get_db_session
 from app.models.user import User
-from app.models.user_capability import UserCapability
+from app.models.user_capability import UserCapability, capability_matches
 
 
 def require_capability(capability: str) -> Callable[..., User]:
@@ -22,13 +22,13 @@ def require_capability(capability: str) -> Callable[..., User]:
         session: AsyncSession = Depends(get_db_session),
     ) -> User:
         result = await session.execute(
-            select(UserCapability.id)
+            select(UserCapability.capability)
             .where(UserCapability.user_id == current_user.id)
-            .where(UserCapability.capability == capability)
-            .limit(1)
+            .limit(100)
         )
+        stored_capabilities = {row[0] for row in result.fetchall()}
 
-        if result.scalar_one_or_none() is None:
+        if not any(capability_matches(value, capability) for value in stored_capabilities):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient capability.",

@@ -77,6 +77,7 @@ async def approve_approval(
         current_user=current_user,
         approval_id=approval_id,
         reason=(payload.reason if payload else None),
+        action_args=(payload.action_args if payload else None),
     )
     return ApprovalSummary(
         id=approval.id,

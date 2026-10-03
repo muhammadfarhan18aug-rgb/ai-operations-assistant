@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from uuid import uuid4
 
 from app.agent.state import GraphState
 from app.database import get_db_session
 from app.policies.retrieval import retrieve_policy_context
 from app.services.approvals import requires_human_approval, _extract_tool_args
+from app.tools.authorization import ToolAuthorizationError, authorize_tool
+from app.tools.context import ToolContext
+from app.tools.registry import resolve_tool
 
 
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
@@ -51,6 +56,29 @@ async def knowledge_node(state: GraphState) -> GraphState:
         return state
 
     async for session in get_db_session():
+        user_id = state.get("user_id")
+        thread_id = state.get("thread_id")
+        if user_id is None:
+            state["retrieval_status"] = "unauthorized"
+            state["grounded_answer"] = "You are not authorized to read policy documents."
+            state["response"] = state["grounded_answer"]
+            state["error"] = "policy_read_denied"
+            break
+
+        context = ToolContext(
+            authenticated_user_id=user_id,
+            thread_id=thread_id,
+            execution_id=uuid4().hex,
+        )
+        try:
+            await authorize_tool(session, context, "policy:read")
+        except ToolAuthorizationError:
+            state["retrieval_status"] = "unauthorized"
+            state["grounded_answer"] = "You are not authorized to read policy documents."
+            state["response"] = state["grounded_answer"]
+            state["error"] = "policy_read_denied"
+            break
+
         result = await retrieve_policy_context(session, question, limit=3)
         state["retrieved_policy_chunks"] = result.retrieved_policy_chunks
         state["citation_metadata"] = result.citation_metadata
@@ -63,17 +91,25 @@ async def knowledge_node(state: GraphState) -> GraphState:
     return state
 
 
-def action_node(state: GraphState) -> GraphState:
-    """Action branch that resolves to an explicit allowlisted tool name without executing it."""
+def _extract_inventory_sku(request_text: str) -> str | None:
+    match = re.search(r"(?i)\b(SKU[-_][A-Za-z0-9_-]+)\b", request_text)
+    if match:
+        return match.group(1)
+    match = re.search(r"(?i)\b(?:sku|product|item)\b\s*[:=]\s*([A-Za-z0-9_-]+)", request_text)
+    return match.group(1) if match else None
+
+
+async def action_node(state: GraphState) -> GraphState:
+    """Resolve an allowlisted action and execute only authorized read-only lookups."""
     request_text = _latest_user_text(state.get("messages", []))
     normalized = request_text.lower()
 
-    if any(keyword in normalized for keyword in ("inventory", "stock", "sku", "quantity")):
-        tool_name = "inventory_lookup"
-    elif any(keyword in normalized for keyword in ("purchase", "po", "order", "buy")):
+    if any(keyword in normalized for keyword in ("purchase", "po", "order", "buy")):
         tool_name = "purchase_order_create"
     elif any(keyword in normalized for keyword in ("email", "send", "notify", "message")):
         tool_name = "email_send"
+    elif any(keyword in normalized for keyword in ("inventory", "stock", "sku", "quantity")):
+        tool_name = "inventory_lookup"
     elif any(keyword in normalized for keyword in ("policy", "procedure", "compliance", "document")):
         tool_name = "policy_lookup"
     else:
@@ -87,6 +123,50 @@ def action_node(state: GraphState) -> GraphState:
         "status": "pending_authorization",
         "tool_name": tool_name,
     }
+
+    if tool_name == "inventory_lookup":
+        sku = _extract_inventory_sku(request_text)
+        user_id = state.get("user_id")
+        thread_id = state.get("thread_id")
+        if not sku or user_id is None or thread_id is None:
+            state["action_request"]["status"] = "invalid_request"
+            state["response"] = "Provide a product SKU to look up inventory."
+            state["error"] = "inventory_lookup_missing_context"
+            state["approval_request"] = {
+                "required": False,
+                "tool_name": tool_name,
+                "status": "not_required",
+                "action_args": {},
+                "reason": "Inventory lookup is read-only.",
+            }
+            return state
+
+        context = ToolContext(authenticated_user_id=user_id, thread_id=thread_id, execution_id=uuid4().hex)
+        try:
+            tool = resolve_tool(tool_name)
+            async for session in get_db_session():
+                result = await tool(session, context, sku=sku)
+                break
+        except ToolAuthorizationError:
+            state["action_request"]["status"] = "denied"
+            state["response"] = "Inventory lookup is not authorized or the requested product was not found."
+            state["error"] = "inventory_lookup_denied"
+            result = None
+        else:
+            state["action_request"]["status"] = "executed"
+            state["action_request"]["result"] = result
+            state["response"] = f"Inventory for {result['sku']}: {result['quantity_on_hand']} units on hand."
+            state["error"] = None
+
+        state["approval_request"] = {
+            "required": False,
+            "tool_name": tool_name,
+            "status": "not_required",
+            "action_args": {"sku": sku},
+            "reason": "Inventory lookup is read-only.",
+        }
+        state["citations"] = []
+        return state
 
     requires_approval = requires_human_approval(tool_name)
     if requires_approval:

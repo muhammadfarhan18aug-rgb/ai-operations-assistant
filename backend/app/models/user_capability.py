@@ -17,7 +17,50 @@ VALID_CAPABILITIES = {
     "inventory:read",
     "order:create",
     "email:send",
+    "policy",
+    "inventory",
+    "order",
+    "email",
 }
+
+CAPABILITY_ALIASES = {
+    "policy": {"policy", "policy:read"},
+    "policy:read": {"policy", "policy:read"},
+    "inventory": {"inventory", "inventory:read"},
+    "inventory:read": {"inventory", "inventory:read"},
+    "order": {"order", "order:create"},
+    "order:create": {"order", "order:create"},
+    "email": {"email", "email:send"},
+    "email:send": {"email", "email:send"},
+}
+
+
+def normalize_capability(value: str) -> str:
+    """Normalize a capability string into the canonical colon-based form used in storage."""
+    cleaned = (value or "").strip().lower()
+    if not cleaned:
+        return cleaned
+    if cleaned in CAPABILITY_ALIASES:
+        canonical = {
+            "policy": "policy:read",
+            "inventory": "inventory:read",
+            "order": "order:create",
+            "email": "email:send",
+        }.get(cleaned, cleaned)
+        return canonical
+    return cleaned
+
+
+def capability_matches(candidate: str, required: str) -> bool:
+    """Return whether a stored capability value satisfies the required capability alias."""
+    candidate_key = normalize_capability(candidate)
+    required_key = normalize_capability(required)
+    return candidate_key in CAPABILITY_ALIASES.get(required_key, {required_key})
+
+
+def display_capability(value: str) -> str:
+    """Return the canonical database capability value for API responses."""
+    return normalize_capability(value)
 
 
 class UserCapability(Base):
@@ -51,6 +94,7 @@ class UserCapability(Base):
 
     @validates("capability")
     def validate_capability(self, _key: str, value: str) -> str:
-        if value not in VALID_CAPABILITIES:
+        normalized = normalize_capability(value)
+        if normalized not in VALID_CAPABILITIES:
             raise ValueError(f"Unsupported capability: {value}")
-        return value
+        return normalized

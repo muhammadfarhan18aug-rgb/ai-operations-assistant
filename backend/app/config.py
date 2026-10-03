@@ -25,10 +25,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/ai_operations"
     jwt_secret: str = "change_this_in_development"
     jwt_expire_minutes: int = 60
+    seed_password: str = ""
     seed_admin_password: str = ""
-    seed_ops_password: str = ""
-    seed_manager_password: str = ""
-    seed_viewer_password: str = ""
+    seed_ali_password: str = ""
+    seed_sara_password: str = ""
+    seed_dave_password: str = ""
 
     model_provider: str = ""
     model_name: str = ""

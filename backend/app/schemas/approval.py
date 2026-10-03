@@ -10,6 +10,7 @@ class ApprovalDecisionRequest(BaseModel):
     """Human decision payload for an approval record."""
 
     reason: str | None = Field(default=None, max_length=255)
+    action_args: dict[str, Any] | None = None
 
 
 class ApprovalSummary(BaseModel):

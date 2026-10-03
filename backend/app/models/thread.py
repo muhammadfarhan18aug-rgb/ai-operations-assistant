@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -23,6 +24,12 @@ class Thread(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    messages: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

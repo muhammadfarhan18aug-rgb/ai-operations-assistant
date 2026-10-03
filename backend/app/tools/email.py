@@ -85,7 +85,7 @@ async def send_email(
     session.add(audit)
     await session.commit()
 
-    return {
+    dispatched = {
         "status": "queued",
         "provider": "development-backend",
         "recipient": str(data.recipient),
@@ -93,3 +93,11 @@ async def send_email(
         "body": data.body,
         "idempotency_key": data.idempotency_key,
     }
+    print(
+        "DISPATCHED EMAIL\n"
+        f"To: {dispatched['recipient']}\n"
+        f"Subject: {dispatched['subject']}\n"
+        f"Body:\n{dispatched['body']}\n"
+        f"Idempotency key: {dispatched['idempotency_key']}"
+    )
+    return dispatched

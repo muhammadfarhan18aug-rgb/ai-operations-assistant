@@ -1,8 +1,9 @@
-"""Seed command for the four demo users and their capabilities."""
+"""Seed command for the required demo users and their capabilities."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from sqlalchemy import select
@@ -16,30 +17,37 @@ from app.services.password import hash_password
 
 SEED_USERS: list[dict[str, Any]] = [
     {
-        "email": "admin@cellutech.com",
+        "email": "admin@assistant.test",
         "password_field": "seed_admin_password",
         "is_admin": True,
         "capabilities": ["policy:read", "inventory:read", "order:create", "email:send"],
     },
     {
-        "email": "ops@cellutech.com",
-        "password_field": "seed_ops_password",
+        "email": "ali@assistant.test",
+        "password_field": "seed_ali_password",
         "is_admin": False,
-        "capabilities": ["policy:read", "inventory:read", "order:create", "email:send"],
+        "capabilities": ["policy:read", "inventory:read"],
     },
     {
-        "email": "manager@cellutech.com",
-        "password_field": "seed_manager_password",
+        "email": "sara@assistant.test",
+        "password_field": "seed_sara_password",
         "is_admin": False,
         "capabilities": ["policy:read", "inventory:read", "order:create"],
     },
     {
-        "email": "viewer@cellutech.com",
-        "password_field": "seed_viewer_password",
+        "email": "dave@assistant.test",
+        "password_field": "seed_dave_password",
         "is_admin": False,
-        "capabilities": ["policy:read", "inventory:read"],
+        "capabilities": [],
     },
 ]
+
+LEGACY_SEED_FIELD_ALIASES: dict[str, str] = {
+    "seed_admin_password": "SEED_ADMIN_PASSWORD",
+    "seed_ali_password": "SEED_ALI_PASSWORD",
+    "seed_sara_password": "SEED_SARA_PASSWORD",
+    "seed_dave_password": "SEED_DAVE_PASSWORD",
+}
 
 
 async def ensure_capability(
@@ -73,9 +81,16 @@ async def seed_demo_users() -> dict[str, list[str]]:
     seed_passwords: dict[str, str] = {}
 
     for seed in SEED_USERS:
-        password_value = getattr(settings, seed["password_field"])
+        password_field = seed["password_field"]
+        password_value = (
+            getattr(settings, password_field, "")
+            or os.getenv(LEGACY_SEED_FIELD_ALIASES.get(password_field, password_field.upper()), "")
+            or os.getenv("SEED_PASSWORD", "")
+        )
         if not password_value:
-            raise RuntimeError(f"Missing required seed password: {seed['password_field']}.")
+            raise RuntimeError(
+                "Seed credentials are not configured. Set SEED_PASSWORD or the per-user SEED_* environment variables before seeding demo users."
+            )
         seed_passwords[seed["email"]] = password_value
 
     async for session in get_db_session():

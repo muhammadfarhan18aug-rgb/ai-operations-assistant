@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
 from app.main import app
 from app.models.approval import ApprovalRequest
+from app.models.email_message import EmailMessage
 from app.models.order import Order
 from app.models.product import Product
 from app.models.thread import Thread
@@ -158,7 +161,7 @@ async def test_user_cannot_approve_another_users_approval(async_client, session)
 @pytest.mark.asyncio
 async def test_pending_approval_and_action_request_are_supported_in_chat_state(session):
     await seed_demo_users()
-    user = (await session.execute(__import__('sqlalchemy').select(User).where(User.email == "manager@cellutech.com"))).scalar_one()
+    user = (await session.execute(__import__('sqlalchemy').select(User).where(User.email == "ops@cellutech.com"))).scalar_one()
     thread = await _create_thread(session, user.id)
     approval = await persist_pending_approval(
         session,
@@ -174,3 +177,37 @@ async def test_pending_approval_and_action_request_are_supported_in_chat_state(s
     assert stored.status == "PENDING"
     assert stored.tool_name == "email_send"
     assert stored.user_id == user.id
+
+    email_query = __import__('sqlalchemy').select(EmailMessage).where(EmailMessage.idempotency_key == approval.idempotency_key)
+    assert (await session.execute(email_query)).scalar_one_or_none() is None
+
+    stored = await approve_approval_request(session, current_user=user, approval_id=approval.id)
+    assert stored.status == "EXECUTED"
+    assert stored.result["status"] == "queued"
+    assert (await session.execute(email_query)).scalar_one_or_none() is not None
+
+    with pytest.raises(HTTPException) as exc_info:
+        await approve_approval_request(session, current_user=user, approval_id=approval.id)
+    assert exc_info.value.status_code == 409
+
+    expired_thread = await _create_thread(session, user.id, title="Expired approval thread")
+    sku = f"SKU-EXPIRED-{uuid.uuid4().hex[:8]}"
+    await _create_product(session, sku)
+    approval = await persist_pending_approval(
+        session,
+        user_id=user.id,
+        thread_id=str(expired_thread.id),
+        tool_name="purchase_order_create",
+        action_args={"sku": sku, "quantity": 1, "supplier": "Acme Supplies"},
+    )
+    approval.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await approve_approval_request(session, current_user=user, approval_id=approval.id)
+
+    assert exc_info.value.status_code == 409
+    expired = await session.get(ApprovalRequest, approval.id)
+    assert expired is not None
+    assert expired.status == "EXPIRED"
+    assert (await session.execute(__import__('sqlalchemy').select(Order).where(Order.sku == sku))).scalar_one_or_none() is None

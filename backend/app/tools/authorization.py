@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.thread import Thread
 from app.models.user import User
-from app.models.user_capability import UserCapability
+from app.models.user_capability import UserCapability, capability_matches
 from app.tools.context import ToolContext
 
 
@@ -37,12 +37,12 @@ async def authorize_tool(session: AsyncSession, context: ToolContext, required_c
         raise ToolAuthorizationError("Authenticated user is not active.")
 
     result = await session.execute(
-        select(UserCapability.id)
+        select(UserCapability.capability)
         .where(UserCapability.user_id == user.id)
-        .where(UserCapability.capability == required_capability)
-        .limit(1)
+        .limit(100)
     )
-    if result.scalar_one_or_none() is None:
+    stored_capabilities = {row[0] for row in result.fetchall()}
+    if not any(capability_matches(capability, required_capability) for capability in stored_capabilities):
         raise ToolAuthorizationError(f"User does not have the '{required_capability}' capability.")
 
     return user
