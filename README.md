@@ -155,6 +155,37 @@ cd backend
 pytest -q
 ```
 
+## Grounded policy Q&A (Step 6)
+
+Step 6 adds a repository-backed policy grounding pipeline that answers knowledge questions from actual policy documents instead of relying on ungrounded model memory.
+
+### Policy document ingestion
+
+- Policy source documents live under `backend/app/policies/documents/`.
+- The ingestion service loads Markdown policy files, derives stable document metadata, and writes the source text to the `documents` table.
+- Each document is chunked into readable sections and stored as `document_chunks` rows with ordering metadata and embeddings references.
+
+### Local embedding and retrieval
+
+- The development embedding service uses a deterministic local hash-based vector representation.
+- A lightweight local vector store ranks chunk similarity against the current user question.
+- Retrieval includes citation metadata, policy section labels, document identifiers, and version/source details.
+- The implementation enforces a minimum relevance threshold so unrelated questions return an explicit `no relevant policy found` result instead of a false match.
+
+### Grounded responses and safety boundaries
+
+- The knowledge branch reads the latest user message and calls the retrieval service before constructing a response.
+- Responses are grounded in retrieved policy snippets and cite the matching document metadata.
+- Prompt injection text inside policy documents is treated as content, not executable instruction.
+- Policy retrieval does not grant capabilities, execute operational tools, or bypass the database-authoritative authorization model established in earlier steps.
+- The operational tools remain separate from the knowledge branch and continue to require the existing DB-backed capability checks.
+
+### Current limits
+
+- This is a local deterministic retrieval approach suited to development and validation.
+- It does not add external vector databases, external embedding APIs, or later approval workflows.
+- It does not change the separate operational tool authorization layer or any Step 1–5 authorization behavior.
+
 ## Operational tools and security
 
 This project includes a secure operational tool layer built on the existing PostgreSQL-backed capability model.

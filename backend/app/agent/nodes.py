@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.state import GraphState
+from app.database import get_db_session
+from app.policies.retrieval import retrieve_policy_context
 
 
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
@@ -27,17 +29,36 @@ def classify_message(state: GraphState) -> GraphState:
     return state
 
 
-def knowledge_node(state: GraphState) -> GraphState:
-    """Knowledge branch placeholder for future in-context reasoning."""
+async def knowledge_node(state: GraphState) -> GraphState:
+    """Knowledge branch that grounds answers in retrieved policy documents only."""
+    question = _latest_user_text(state.get("messages", []))
     state["intent"] = "knowledge"
-    state["response"] = (
-        "Knowledge requests are routed to the future retrieval and reasoning layer; "
-        "this foundation only enforces the branch boundary and safe state handling."
-    )
+    state["user_question"] = question
+    state["retrieved_policy_chunks"] = []
+    state["citation_metadata"] = []
+    state["grounded_answer"] = ""
+    state["retrieval_status"] = "unknown"
     state["citations"] = []
     state["action_request"] = None
     state["approval_request"] = None
     state["error"] = None
+
+    if not question:
+        state["retrieval_status"] = "no_question"
+        state["grounded_answer"] = "No question was provided for grounded policy retrieval."
+        state["response"] = state["grounded_answer"]
+        return state
+
+    async for session in get_db_session():
+        result = await retrieve_policy_context(session, question, limit=3)
+        state["retrieved_policy_chunks"] = result.retrieved_policy_chunks
+        state["citation_metadata"] = result.citation_metadata
+        state["grounded_answer"] = result.grounded_answer
+        state["retrieval_status"] = result.retrieval_status
+        state["citations"] = [citation["document_title"] for citation in result.citation_metadata]
+        state["response"] = result.grounded_answer
+        break
+
     return state
 
 

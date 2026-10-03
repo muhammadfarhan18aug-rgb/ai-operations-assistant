@@ -14,6 +14,11 @@ class GraphState(TypedDict):
     intent: str
     response: str
     citations: list[str]
+    user_question: str
+    retrieved_policy_chunks: list[str]
+    citation_metadata: list[dict[str, Any]]
+    grounded_answer: str
+    retrieval_status: str
     action_request: dict[str, Any] | None
     approval_request: dict[str, Any] | None
     error: str | None
