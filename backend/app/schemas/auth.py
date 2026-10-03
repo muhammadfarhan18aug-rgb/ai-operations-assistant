@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.email import EmailAddress
 
 
 class LoginRequest(BaseModel):
     """Authentication payload for a user login request."""
 
-    email: EmailStr
+    email: EmailAddress
     password: str = Field(..., min_length=1)
 
 

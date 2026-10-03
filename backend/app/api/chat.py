@@ -33,6 +33,7 @@ async def create_chat_message(
                 session=session,
                 current_user=current_user,
                 message=payload.message,
+                graph=request.app.state.graph,
                 thread_id=payload.thread_id,
             ),
             media_type="text/event-stream",
@@ -43,12 +44,14 @@ async def create_chat_message(
         session=session,
         current_user=current_user,
         message=payload.message,
+        graph=request.app.state.graph,
         thread_id=payload.thread_id,
     )
 
 
 @router.post("/stream")
 async def stream_chat_message_route(
+    request: Request,
     payload: ChatRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
@@ -62,6 +65,7 @@ async def stream_chat_message_route(
             session=session,
             current_user=current_user,
             message=payload.message,
+            graph=request.app.state.graph,
             thread_id=payload.thread_id,
         ),
         media_type="text/event-stream",

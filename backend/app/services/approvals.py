@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException, status
+from langgraph.types import Command
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,6 +95,7 @@ async def persist_pending_approval(
     thread_id: str | None,
     tool_name: str,
     action_args: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> ApprovalRequest:
     """Create a durable approval record for an action that requires explicit human approval."""
     if not requires_human_approval(tool_name):
@@ -108,13 +110,20 @@ async def persist_pending_approval(
     if thread.owner_user_id != user_id:
         raise ValueError("Thread does not belong to the authenticated user.")
 
+    if idempotency_key:
+        existing = await session.scalar(
+            select(ApprovalRequest).where(ApprovalRequest.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            return existing
+
     approval = ApprovalRequest(
         user_id=user_id,
         thread_id=thread_id,
         tool_name=tool_name,
         action_args=_sanitize_action_args(action_args),
         status="PENDING",
-        idempotency_key=f"approval-{tool_name}-{uuid4().hex}",
+        idempotency_key=idempotency_key or f"approval-{tool_name}-{uuid4().hex}",
         expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
     )
     session.add(approval)
@@ -141,37 +150,21 @@ async def list_pending_approvals_for_user(session: AsyncSession, user_id: int) -
     return result.scalars().all()
 
 
-async def reject_approval_request(
+async def resume_approval_request(
     session: AsyncSession,
     *,
     current_user: User,
+    graph: Any,
     approval_id: int,
-    reason: str | None = None,
-) -> ApprovalRequest:
-    approval = await get_owned_approval(session, user_id=current_user.id, approval_id=approval_id)
-    if approval.status not in {"PENDING", "APPROVED"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval cannot be rejected in its current state.")
-
-    approval.status = "REJECTED"
-    approval.decision_made_by = current_user.id
-    approval.decision_made_at = datetime.now(timezone.utc)
-    approval.decision_reason = reason or "Rejected by human operator."
-    approval.updated_at = datetime.now(timezone.utc)
-    await session.commit()
-    return approval
-
-
-async def approve_approval_request(
-    session: AsyncSession,
-    *,
-    current_user: User,
-    approval_id: int,
+    decision: str,
     reason: str | None = None,
     action_args: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
     approval = await get_owned_approval(session, user_id=current_user.id, approval_id=approval_id)
-    if approval.status not in {"PENDING", "APPROVED"}:
+    if approval.status != "PENDING":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval is not pending and cannot be executed.")
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported approval decision.")
 
     if approval.expires_at and approval.expires_at <= datetime.now(timezone.utc):
         approval.status = "EXPIRED"
@@ -179,99 +172,114 @@ async def approve_approval_request(
         await session.commit()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval request has expired.")
 
-    if action_args is not None:
-        approval.action_args = _sanitize_action_args(action_args)
-
-    if approval.tool_name == "purchase_order_create":
-        if "sku" not in approval.action_args or "quantity" not in approval.action_args or "supplier" not in approval.action_args:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Edited order arguments are incomplete.")
-        from app.tools.purchase_orders import PurchaseOrderCreateInput
-
-        PurchaseOrderCreateInput(
-            sku=str(approval.action_args["sku"]),
-            quantity=int(approval.action_args["quantity"]),
-            supplier=str(approval.action_args["supplier"]),
-            idempotency_key=str(approval.idempotency_key),
-        )
-    elif approval.tool_name == "email_send":
-        if "recipient" not in approval.action_args or "subject" not in approval.action_args or "body" not in approval.action_args:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Edited email arguments are incomplete.")
-        from app.tools.email import EmailSendInput
-
-        EmailSendInput(
-            recipient=str(approval.action_args["recipient"]),
-            subject=str(approval.action_args["subject"]),
-            body=str(approval.action_args["body"]),
-            idempotency_key=str(approval.idempotency_key),
-        )
-
-    if approval.status == "PENDING":
-        approval.status = "APPROVED"
-        approval.decision_made_by = current_user.id
-        approval.decision_made_at = datetime.now(timezone.utc)
-        approval.decision_reason = reason or "Approved by human operator."
-        approval.updated_at = datetime.now(timezone.utc)
-        await session.flush()
-
+    edited_args = _sanitize_action_args(action_args) if action_args is not None else approval.action_args
+    if decision == "approve":
+        _validate_action_args(approval, edited_args)
+        approval.action_args = edited_args
+    resume_value = {
+        "decision": decision,
+        "reason": reason or ("Approved by human operator." if decision == "approve" else "Rejected by human operator."),
+        "action_args": edited_args,
+    }
+    config = {"configurable": {"thread_id": str(approval.thread_id), "user_id": current_user.id}}
     try:
-        execution_result = await _execute_approved_action(session, approval)
-        approval.status = "EXECUTED"
-        approval.result = execution_result
+        graph_result = await graph.ainvoke(Command(resume=resume_value), config=config)
+        interrupted = _interrupt_payload(graph_result)
+        if interrupted and interrupted.get("tool") == approval.tool_name:
+            approval.action_args = _sanitize_action_args(interrupted.get("action_args"))
+            approval.status = "PENDING"
+            approval.result = {"validation_error": interrupted.get("validation_error")}
+            approval.updated_at = datetime.now(timezone.utc)
+            await _append_assistant_message(session, str(approval.thread_id), graph_result)
+            await session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(interrupted.get("validation_error") or "The resumed action failed validation."),
+            )
+
+        result_key = "order_result" if approval.tool_name == "purchase_order_create" else "email_result"
+        assistant_message = str(graph_result.get("response") or "")
+        if decision == "approve":
+            execution_result = graph_result.get(result_key)
+            approval.status = "EXECUTED" if isinstance(execution_result, dict) else "FAILED"
+            approval.result = {**execution_result, "assistant_message": assistant_message} if isinstance(execution_result, dict) else {
+                "assistant_message": assistant_message,
+                "error": graph_result.get("error") or "The action did not complete.",
+            }
+        else:
+            approval.status = "REJECTED"
+            approval.result = {"assistant_message": assistant_message}
         approval.updated_at = datetime.now(timezone.utc)
         approval.decision_made_by = current_user.id
         approval.decision_made_at = approval.decision_made_at or datetime.now(timezone.utc)
-        approval.decision_reason = approval.decision_reason or reason or "Approved by human operator."
+        approval.decision_reason = resume_value["reason"]
+        await _persist_followup_interrupt(session, graph_result, current_user, str(approval.thread_id))
+        await _append_assistant_message(session, str(approval.thread_id), graph_result)
         await session.commit()
         return approval
-    except Exception as exc:  # pragma: no cover - guarded by tests and runtime exception handling
-        approval.status = "FAILED"
-        approval.result = {"error": str(exc)}
-        approval.updated_at = datetime.now(timezone.utc)
-        approval.decision_reason = approval.decision_reason or reason or "Approval failed during execution."
-        await session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-async def _execute_approved_action(session: AsyncSession, approval: ApprovalRequest) -> dict[str, Any]:
-    if approval.status not in {"PENDING", "APPROVED"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approval is not in an executable state.")
+def _validate_action_args(approval: ApprovalRequest, action_args: dict[str, Any]) -> None:
+    try:
+        if approval.tool_name == "purchase_order_create":
+            from app.tools.purchase_orders import PurchaseOrderCreateInput
 
-    if approval.tool_name == "purchase_order_create":
-        if "sku" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted SKU argument for purchase order creation.")
-        if "quantity" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted quantity argument for purchase order creation.")
-        if "supplier" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted supplier argument for purchase order creation.")
+            PurchaseOrderCreateInput(**action_args, idempotency_key=approval.idempotency_key)
+        elif approval.tool_name == "email_send":
+            from app.tools.email import EmailSendInput
 
-        context = ToolContext(authenticated_user_id=approval.user_id, thread_id=str(approval.thread_id), execution_id=uuid4().hex)
-        await authorize_tool(session, context, "order:create")
-        return await create_purchase_order(
-            session,
-            context,
-            sku=str(approval.action_args["sku"]),
-            quantity=int(approval.action_args["quantity"]),
-            supplier=str(approval.action_args["supplier"]),
-            idempotency_key=approval.idempotency_key,
-        )
+            EmailSendInput(**action_args, idempotency_key=approval.idempotency_key)
+        else:
+            raise ValueError("Approval references an unsupported write tool.")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    if approval.tool_name == "email_send":
-        if "recipient" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted recipient argument for email send.")
-        if "subject" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted subject argument for email send.")
-        if "body" not in approval.action_args:
-            raise ToolAuthorizationError("Approval is missing the persisted body argument for email send.")
 
-        context = ToolContext(authenticated_user_id=approval.user_id, thread_id=str(approval.thread_id), execution_id=uuid4().hex)
-        await authorize_tool(session, context, "email:send")
-        return await send_email(
-            session,
-            context,
-            recipient=str(approval.action_args["recipient"]),
-            subject=str(approval.action_args["subject"]),
-            body=str(approval.action_args["body"]),
-            idempotency_key=approval.idempotency_key,
-        )
+def _interrupt_payload(graph_result: dict[str, Any]) -> dict[str, Any] | None:
+    for interruption in graph_result.get("__interrupt__", ()):
+        value = getattr(interruption, "value", None)
+        if isinstance(value, dict) and value.get("tool"):
+            return value
+    return None
 
-    raise ToolAuthorizationError(f"Tool '{approval.tool_name}' does not support required approval execution.")
+
+async def _persist_followup_interrupt(
+    session: AsyncSession,
+    graph_result: dict[str, Any],
+    current_user: User,
+    thread_id: str,
+) -> None:
+    interrupted = _interrupt_payload(graph_result)
+    if interrupted is None:
+        return
+    await persist_pending_approval(
+        session,
+        user_id=current_user.id,
+        thread_id=thread_id,
+        tool_name=str(interrupted["tool"]),
+        action_args=interrupted.get("action_args") or {},
+        idempotency_key=str(interrupted.get("idempotency_key") or "") or None,
+    )
+
+
+async def _append_assistant_message(
+    session: AsyncSession,
+    thread_id: str,
+    graph_result: dict[str, Any],
+) -> None:
+    thread = await session.get(Thread, thread_id)
+    if thread is None:
+        return
+    interrupted = _interrupt_payload(graph_result)
+    response = str(graph_result.get("response") or "")
+    if interrupted:
+        response = str(interrupted.get("description") or "Approval is required before this action can run.")
+    if response:
+        thread.messages = [
+            *(thread.messages or []),
+            {"role": "assistant", "content": response, "citations": []},
+        ]

@@ -50,6 +50,11 @@ type ChatResponse = {
 
 type StreamEventPayload = Partial<ChatResponse> & {
   message?: string
+  content?: string
+  route?: string
+  steps?: string[]
+  tool?: string
+  tool_name?: string
 }
 
 type AdminUser = UserSummary
@@ -164,6 +169,7 @@ export default function App() {
   const [threadId, setThreadId] = useState<string | null>(null)
   const [chatResponse, setChatResponse] = useState<ChatResponse | null>(null)
   const [streamingStatus, setStreamingStatus] = useState('')
+  const [progressEvents, setProgressEvents] = useState<string[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [route, setRoute] = useState<string>(() => window.location.pathname)
@@ -171,6 +177,16 @@ export default function App() {
   const [documents, setDocuments] = useState<AdminDocument[]>([])
   const [indexingStatus, setIndexingStatus] = useState<Record<string, number>>({})
   const [activity, setActivity] = useState<AdminActivity | null>(null)
+  const [approvalDrafts, setApprovalDrafts] = useState<Record<number, Record<string, string>>>({})
+  const [approvalFeedback, setApprovalFeedback] = useState('')
+  const [newUserEmail, setNewUserEmail] = useState('')
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [newUserAdmin, setNewUserAdmin] = useState(false)
+  const [newUserCapabilities, setNewUserCapabilities] = useState<string[]>([])
+  const [capabilitySelections, setCapabilitySelections] = useState<Record<number, string>>({})
+  const [documentTitle, setDocumentTitle] = useState('')
+  const [documentFilename, setDocumentFilename] = useState('')
+  const [documentContent, setDocumentContent] = useState('')
 
   const isAuthenticated = Boolean(user)
   const isAdmin = Boolean(user?.is_admin)
@@ -228,6 +244,15 @@ export default function App() {
     try {
       const approvals = await apiRequest<ApprovalSummary[]>('/approvals/pending')
       setPendingApprovals(approvals)
+      setApprovalDrafts((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          approvals.map((approval) => [
+            approval.id,
+            Object.fromEntries(Object.entries(approval.action_args).map(([key, value]) => [key, String(value ?? '')])),
+          ]),
+        ),
+      }))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load pending approvals.')
     }
@@ -297,6 +322,8 @@ export default function App() {
     setLoading(true)
     setError('')
     setStreamingStatus('Connecting to chat...')
+    setProgressEvents([])
+    setChatResponse(null)
 
     try {
       const response = await fetch(`${API_BASE}/chat/stream`, {
@@ -311,11 +338,37 @@ export default function App() {
       const result = await consumeChatStream(response, (eventName, payload) => {
         if (eventName === 'status') {
           setStreamingStatus(payload.message ?? 'Processing request...')
+          setProgressEvents((events) => [...events, payload.message ?? 'Processing request...'])
           if (payload.thread_id) {
             setThreadId(payload.thread_id)
           }
-        } else if (eventName === 'approval') {
-          setStreamingStatus('Approval request saved')
+        } else if (eventName === 'routing') {
+          const steps = Array.isArray(payload.steps) ? payload.steps.join(' → ') : ''
+          const message = steps ? `Planned steps: ${steps}` : `Routed to ${String(payload.route ?? 'assistant')}`
+          setStreamingStatus(message)
+          setProgressEvents((events) => [...events, message])
+        } else if (eventName === 'tool_started') {
+          const message = `Started ${String(payload.tool ?? 'tool')}`
+          setStreamingStatus(message)
+          setProgressEvents((events) => [...events, message])
+        } else if (eventName === 'tool_result') {
+          const message = `Completed ${String(payload.tool ?? 'tool')}`
+          setStreamingStatus(message)
+          setProgressEvents((events) => [...events, message])
+        } else if (eventName === 'assistant_delta') {
+          const content = payload.content ?? ''
+          setChatResponse((current) => ({
+            thread_id: payload.thread_id ?? current?.thread_id ?? threadId ?? '',
+            user_id: current?.user_id ?? user?.id ?? 0,
+            intent: current?.intent ?? 'knowledge',
+            response: `${current?.response ?? ''}${content}`,
+            citations: current?.citations ?? [],
+            citation_metadata: current?.citation_metadata ?? [],
+          }))
+        } else if (eventName === 'approval_required') {
+          const message = `Paused for approval: ${String(payload.tool_name ?? 'write action')}`
+          setStreamingStatus(message)
+          setProgressEvents((events) => [...events, message])
         } else if (eventName === 'error') {
           throw new Error(payload.message ?? 'The chat request could not be completed.')
         }
@@ -333,7 +386,11 @@ export default function App() {
     }
   }
 
-  async function decideApproval(approvalId: number, decision: 'approve' | 'reject') {
+  async function decideApproval(
+    approvalId: number,
+    decision: 'approve' | 'reject',
+    actionArgs?: Record<string, unknown>,
+  ) {
     if (!isAuthenticated) {
       return
     }
@@ -342,15 +399,96 @@ export default function App() {
     setError('')
 
     try {
-      await apiRequest(`/approvals/${approvalId}/${decision}`, {
+      const decisionResult = await apiRequest<ApprovalSummary>(`/approvals/${approvalId}/${decision}`, {
         method: 'POST',
-        body: JSON.stringify({ reason: decision === 'approve' ? 'Approved from UI' : 'Rejected from UI' }),
+        body: JSON.stringify({
+          reason: decision === 'approve' ? 'Approved from UI' : 'Rejected from UI',
+          ...(actionArgs ? { action_args: actionArgs } : {}),
+        }),
       })
+      const message = decisionResult.result?.assistant_message
+      setApprovalFeedback(typeof message === 'string' ? message : '')
       await loadPendingApprovals()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to update approval.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function createAdminUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      await apiRequest('/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserAdmin,
+          capabilities: newUserCapabilities,
+        }),
+      })
+      setNewUserEmail('')
+      setNewUserPassword('')
+      setNewUserAdmin(false)
+      setNewUserCapabilities([])
+      await loadUsers()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create user.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function setUserActive(userId: number, active: boolean) {
+    try {
+      await apiRequest(`/admin/users/${userId}/${active ? 'reactivate' : 'deactivate'}`, { method: 'POST' })
+      await loadUsers()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update user status.')
+    }
+  }
+
+  async function changeCapability(userId: number, capability: string, grant: boolean) {
+    try {
+      await apiRequest(`/admin/users/${userId}/capabilities`, {
+        method: grant ? 'POST' : 'DELETE',
+        ...(grant ? { body: JSON.stringify({ capability }) } : { body: JSON.stringify({ capability }) }),
+      })
+      await loadUsers()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update capability.')
+    }
+  }
+
+  async function uploadDocument(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      await apiRequest('/admin/documents', {
+        method: 'POST',
+        body: JSON.stringify({ title: documentTitle, filename: documentFilename, content: documentContent }),
+      })
+      setDocumentTitle('')
+      setDocumentFilename('')
+      setDocumentContent('')
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to upload document.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function removeDocument(documentId: number) {
+    try {
+      await apiRequest(`/admin/documents/${documentId}`, { method: 'DELETE' })
+      await loadDocuments()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to remove document.')
     }
   }
 
@@ -367,6 +505,7 @@ export default function App() {
     setError('')
     setThreadId(null)
     setStreamingStatus('')
+    setApprovalFeedback('')
     navigate('/')
   }
 
@@ -382,10 +521,63 @@ export default function App() {
       return (
         <div className="admin-panel">
           <h2>Users</h2>
-          <ul>
+          <form className="admin-form" onSubmit={createAdminUser}>
+            <h3>Create user</h3>
+            <label htmlFor="new-user-email">Email</label>
+            <input id="new-user-email" type="email" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} required />
+            <label htmlFor="new-user-password">Initial password</label>
+            <input id="new-user-password" type="password" value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} minLength={8} required />
+            <label className="check-row">
+              <input type="checkbox" checked={newUserAdmin} onChange={(event) => setNewUserAdmin(event.target.checked)} />
+              Administrator
+            </label>
+            <fieldset className="capability-options">
+              <legend>Capabilities</legend>
+              {['policy:read', 'inventory:read', 'order:create', 'email:send'].map((capability) => (
+                <label className="check-row" key={capability}>
+                  <input
+                    type="checkbox"
+                    checked={newUserCapabilities.includes(capability)}
+                    onChange={(event) => setNewUserCapabilities((current) => (
+                      event.target.checked ? [...current, capability] : current.filter((item) => item !== capability)
+                    ))}
+                  />
+                  {capability}
+                </label>
+              ))}
+            </fieldset>
+            <button type="submit" className="primary-button" disabled={loading}>Create user</button>
+          </form>
+          <ul className="admin-record-list">
             {users.map((nextUser) => (
-              <li key={nextUser.id}>
-                {nextUser.email} ({nextUser.is_admin ? 'admin' : 'user'}) — {nextUser.capabilities.join(', ') || 'no capabilities'}
+              <li className="admin-record" key={nextUser.id}>
+                <div className="admin-record-heading">
+                  <div>
+                    <strong>{nextUser.email}</strong>
+                    <p>{nextUser.is_admin ? 'Administrator' : 'Operator'} · {nextUser.is_active ? 'Active' : 'Inactive'}</p>
+                  </div>
+                  <button type="button" className="secondary-button" onClick={() => void setUserActive(nextUser.id, !nextUser.is_active)}>
+                    {nextUser.is_active ? 'Deactivate' : 'Reactivate'}
+                  </button>
+                </div>
+                <div className="tag-list">
+                  {nextUser.capabilities.length ? nextUser.capabilities.map((capability) => (
+                    <span className="tag capability-tag" key={capability}>
+                      {capability}
+                      <button type="button" aria-label={`Revoke ${capability} from ${nextUser.email}`} onClick={() => void changeCapability(nextUser.id, capability, false)}>×</button>
+                    </span>
+                  )) : <span>No capabilities</span>}
+                </div>
+                <div className="capability-grant">
+                  <select
+                    aria-label={`Capability to grant to ${nextUser.email}`}
+                    value={capabilitySelections[nextUser.id] ?? 'policy:read'}
+                    onChange={(event) => setCapabilitySelections((current) => ({ ...current, [nextUser.id]: event.target.value }))}
+                  >
+                    {['policy:read', 'inventory:read', 'order:create', 'email:send'].map((capability) => <option key={capability}>{capability}</option>)}
+                  </select>
+                  <button type="button" className="secondary-button" onClick={() => void changeCapability(nextUser.id, capabilitySelections[nextUser.id] ?? 'policy:read', true)}>Grant</button>
+                </div>
               </li>
             ))}
           </ul>
@@ -397,15 +589,34 @@ export default function App() {
       return (
         <div className="admin-panel">
           <h2>Documents</h2>
+          <form className="admin-form" onSubmit={uploadDocument}>
+            <h3>Upload policy document</h3>
+            <label htmlFor="document-title">Title</label>
+            <input id="document-title" value={documentTitle} onChange={(event) => setDocumentTitle(event.target.value)} required />
+            <label htmlFor="document-filename">Filename</label>
+            <input id="document-filename" value={documentFilename} onChange={(event) => setDocumentFilename(event.target.value)} placeholder="Optional" />
+            <label htmlFor="document-content">Content</label>
+            <textarea id="document-content" value={documentContent} onChange={(event) => setDocumentContent(event.target.value)} rows={8} required />
+            <button type="submit" className="primary-button" disabled={loading}>Upload and index</button>
+          </form>
+          <h3>Indexing status</h3>
           <div className="tag-list">
             {Object.entries(indexingStatus).map(([status, count]) => (
               <span className="tag" key={status}>{status}: {count}</span>
             ))}
           </div>
-          <ul>
+          <ul className="admin-record-list">
             {documents.map((document) => (
-              <li key={document.id}>
-                {document.title} ({document.index_status})
+              <li className="admin-record" key={document.id}>
+                <div className="admin-record-heading">
+                  <div>
+                    <strong>{document.title}</strong>
+                    <p>{document.filename} · {document.document_identifier}</p>
+                  </div>
+                  <span className="tag">{document.index_status}</span>
+                </div>
+                <p>{document.source} · v{document.version}</p>
+                <button type="button" className="secondary-button" onClick={() => void removeDocument(document.id)}>Remove from retrieval</button>
               </li>
             ))}
           </ul>
@@ -421,20 +632,32 @@ export default function App() {
             <>
               <h3>Audit trail</h3>
               <ul>
-                {activity.audit_trail.map((entry, index) => (
-                  <li key={`${String(entry.tool ?? 'audit')}-${index}`}>{String(entry.tool ?? 'audit')} — {String(entry.outcome ?? '')}</li>
+                {activity.audit_trail.map((entry) => (
+                  <li key={String(entry.id)}>
+                    <strong>{String(entry.tool ?? 'audit')} · {String(entry.outcome ?? '')}</strong>
+                    <p>User {String(entry.user_id ?? '')} · {String(entry.created_at ?? '')} · Thread {String(entry.thread_id ?? '')}</p>
+                    <pre>{JSON.stringify(entry.arguments ?? {}, null, 2)}</pre>
+                  </li>
                 ))}
               </ul>
               <h3>Orders</h3>
               <ul>
-                {activity.orders.map((order, index) => (
-                  <li key={`order-${index}`}>{String(order.order_reference ?? 'Order')} — {String(order.quantity ?? '')} units</li>
+                {activity.orders.map((order) => (
+                  <li key={String(order.id)}>
+                    <strong>{String(order.order_reference ?? 'Order')}</strong>
+                    <p>{String(order.quantity ?? '')} × {String(order.sku ?? '')} · {String(order.supplier ?? '')} · Requested by {String(order.requested_by ?? '')}</p>
+                    <p>{String(order.created_at ?? '')}</p>
+                  </li>
                 ))}
               </ul>
               <h3>Email</h3>
               <ul>
-                {activity.email_messages.map((message, index) => (
-                  <li key={`email-${index}`}>{String(message.recipient ?? 'Email')} — {String(message.subject ?? '')}</li>
+                {activity.email_messages.map((message) => (
+                  <li key={String(message.id)}>
+                    <strong>{String(message.subject ?? 'Email')}</strong>
+                    <p>To {String(message.recipient ?? '')} · Sent by {String(message.sent_by ?? '')} · {String(message.sent_at ?? '')}</p>
+                    <p>{String(message.body ?? '')}</p>
+                  </li>
                 ))}
               </ul>
             </>
@@ -462,6 +685,7 @@ export default function App() {
             </button>
           ) : null}
         </div>
+        {isAuthenticated && error ? <p className="error-text" role="alert">{error}</p> : null}
 
         {!isAuthenticated ? (
           <form className="auth-card" onSubmit={handleLogin}>
@@ -577,6 +801,11 @@ export default function App() {
                 </button>
               </form>
               {streamingStatus ? <p className="response-intent" aria-live="polite">{streamingStatus}</p> : null}
+              {progressEvents.length > 0 ? (
+                <ol className="progress-list" aria-live="polite">
+                  {progressEvents.map((event, index) => <li key={`${event}-${index}`}>{event}</li>)}
+                </ol>
+              ) : null}
 
               {chatResponse ? (
                 <article className="message-card">
@@ -614,24 +843,67 @@ export default function App() {
 
             <div className="approvals-panel">
               <h2>Pending approvals</h2>
+              {approvalFeedback ? <p className="response-intent" role="status">{approvalFeedback}</p> : null}
               {pendingApprovals.length > 0 ? (
-                pendingApprovals.map((approval) => (
-                  <div className="approval-card" key={approval.id}>
-                    <div>
-                      <strong>{approval.tool_name}</strong>
-                      <p>{approval.thread_id}</p>
+                pendingApprovals.map((approval) => {
+                  const fields = approval.tool_name === 'purchase_order_create'
+                    ? ['sku', 'quantity', 'supplier']
+                    : ['recipient', 'subject', 'body']
+                  const draft = approvalDrafts[approval.id] ?? {}
+                  const editedArgs = Object.fromEntries(fields.map((field) => [
+                    field,
+                    field === 'quantity' ? Number(draft[field]) : (draft[field] ?? String(approval.action_args[field] ?? '')),
+                  ]))
+                  return (
+                    <div className="approval-card" key={approval.id}>
+                      <div>
+                        <strong>{approval.tool_name === 'purchase_order_create' ? 'Purchase order' : 'Email'}</strong>
+                        <p>{approval.thread_id}</p>
+                      </div>
+                      <div className="approval-fields">
+                        {fields.map((field) => (
+                          <label className="field-row" key={field}>
+                            {field === 'sku' ? 'SKU' : field.charAt(0).toUpperCase() + field.slice(1)}
+                            {field === 'body' ? (
+                              <textarea
+                                aria-label={`${field} for approval ${approval.id}`}
+                                value={draft[field] ?? String(approval.action_args[field] ?? '')}
+                                onChange={(event) => setApprovalDrafts((current) => ({
+                                  ...current,
+                                  [approval.id]: { ...current[approval.id], [field]: event.target.value },
+                                }))}
+                                rows={4}
+                              />
+                            ) : (
+                              <input
+                                aria-label={`${field} for approval ${approval.id}`}
+                                type={field === 'quantity' ? 'number' : field === 'recipient' ? 'email' : 'text'}
+                                min={field === 'quantity' ? 1 : undefined}
+                                value={draft[field] ?? String(approval.action_args[field] ?? '')}
+                                onChange={(event) => setApprovalDrafts((current) => ({
+                                  ...current,
+                                  [approval.id]: { ...current[approval.id], [field]: event.target.value },
+                                }))}
+                                required
+                              />
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="approval-actions">
+                        <button type="button" className="primary-button" disabled={loading} onClick={() => void decideApproval(approval.id, 'approve')}>
+                          Approve
+                        </button>
+                        <button type="button" className="secondary-button" disabled={loading} onClick={() => void decideApproval(approval.id, 'approve', editedArgs)}>
+                          Edit and Approve
+                        </button>
+                        <button type="button" className="secondary-button" disabled={loading} onClick={() => void decideApproval(approval.id, 'reject')}>
+                          Reject
+                        </button>
+                      </div>
                     </div>
-                    <pre>{JSON.stringify(approval.action_args, null, 2)}</pre>
-                    <div className="approval-actions">
-                      <button type="button" className="primary-button" onClick={() => decideApproval(approval.id, 'approve')}>
-                        Approve
-                      </button>
-                      <button type="button" className="secondary-button" onClick={() => decideApproval(approval.id, 'reject')}>
-                        Reject
-                      </button>
-                    </div>
-                  </div>
-                ))
+                  )
+                })
               ) : (
                 <p className="empty-state">No pending approvals.</p>
               )}

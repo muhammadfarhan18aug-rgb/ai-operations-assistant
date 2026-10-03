@@ -29,9 +29,9 @@ def configure_demo_env(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "this_is_a_very_long_test_secret_key_1234567890")
     monkeypatch.setenv("JWT_EXPIRE_MINUTES", "60")
     monkeypatch.setenv("SEED_ADMIN_PASSWORD", "AdminPassword123!")
-    monkeypatch.setenv("SEED_OPS_PASSWORD", "OpsPassword123!")
-    monkeypatch.setenv("SEED_MANAGER_PASSWORD", "ManagerPassword123!")
-    monkeypatch.setenv("SEED_VIEWER_PASSWORD", "ViewerPassword123!")
+    monkeypatch.setenv("SEED_ALI_PASSWORD", "AliPassword123!")
+    monkeypatch.setenv("SEED_SARA_PASSWORD", "SaraPassword123!")
+    monkeypatch.setenv("SEED_DAVE_PASSWORD", "DavePassword123!")
     yield
 
 
@@ -74,7 +74,7 @@ async def _get_user_by_email(session, email: str) -> User:
 @pytest.mark.asyncio
 async def test_inventory_lookup_requires_capability(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "dave@assistant.test")
     thread = await _create_thread(session, user.id)
     ctx = ToolContext(authenticated_user_id=user.id, thread_id=str(thread.id), execution_id=uuid.uuid4().hex)
 
@@ -85,7 +85,7 @@ async def test_inventory_lookup_requires_capability(session):
 @pytest.mark.asyncio
 async def test_inventory_lookup_with_capability_returns_product(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "ali@assistant.test")
     thread = await _create_thread(session, user.id)
     sku = f"SKU-READ-{uuid.uuid4().hex[:8]}"
     await _create_product(session, sku, quantity_on_hand=7, unit_price=Decimal("12.50"))
@@ -99,7 +99,7 @@ async def test_inventory_lookup_with_capability_returns_product(session):
 @pytest.mark.asyncio
 async def test_purchase_order_requires_authorization_and_does_not_create_order(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "dave@assistant.test")
     thread = await _create_thread(session, user.id)
     sku = f"SKU-PO-FAIL-{uuid.uuid4().hex[:8]}"
     await _create_product(session, sku, quantity_on_hand=10, unit_price=Decimal("9.00"))
@@ -122,7 +122,7 @@ async def test_purchase_order_requires_authorization_and_does_not_create_order(s
 @pytest.mark.asyncio
 async def test_purchase_order_is_idempotent_for_same_key(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "manager@cellutech.com")
+    user = await _get_user_by_email(session, "sara@assistant.test")
     thread = await _create_thread(session, user.id)
     sku = f"SKU-PO-IDEM-{uuid.uuid4().hex[:8]}"
     await _create_product(session, sku, quantity_on_hand=25, unit_price=Decimal("18.00"))
@@ -155,7 +155,7 @@ async def test_purchase_order_is_idempotent_for_same_key(session):
 @pytest.mark.asyncio
 async def test_email_requires_capability_and_does_not_send(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "dave@assistant.test")
     thread = await _create_thread(session, user.id)
     ctx = ToolContext(authenticated_user_id=user.id, thread_id=str(thread.id), execution_id=uuid.uuid4().hex)
 
@@ -163,7 +163,7 @@ async def test_email_requires_capability_and_does_not_send(session):
         await send_email(
             session,
             ctx,
-            recipient="ops@cellutech.com",
+            recipient="admin@assistant.test",
             subject="Test",
             body="hello",
             idempotency_key="email-key-1",
@@ -173,7 +173,7 @@ async def test_email_requires_capability_and_does_not_send(session):
 @pytest.mark.asyncio
 async def test_authorization_ignores_client_supplied_capability_and_admin_fields(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "dave@assistant.test")
     thread = await _create_thread(session, user.id)
     ctx = ToolContext(authenticated_user_id=user.id, thread_id=str(thread.id), execution_id=uuid.uuid4().hex)
 
@@ -195,7 +195,7 @@ async def test_authorization_ignores_client_supplied_capability_and_admin_fields
 async def test_policy_lookup_requires_capability_and_uses_db_documents(session):
     await seed_demo_users()
     unauthorized = User(
-        email=f"no-policy-{uuid.uuid4().hex[:8]}@cellutech.com",
+        email=f"no-policy-{uuid.uuid4().hex[:8]}@assistant.test",
         password_hash="$argon2id$v=19$m=65536,t=3,p=4$abcdefghijklmnopqrstuv$abcdefghijklmnopqrstuv",
         is_admin=False,
         is_active=True,
@@ -209,7 +209,7 @@ async def test_policy_lookup_requires_capability_and_uses_db_documents(session):
     with pytest.raises(ToolAuthorizationError):
         await lookup_policy(session, ctx, title="Procurement policy")
 
-    privileged = await _get_user_by_email(session, "manager@cellutech.com")
+    privileged = await _get_user_by_email(session, "ali@assistant.test")
     privileged_ctx = ToolContext(authenticated_user_id=privileged.id, thread_id=str(thread.id), execution_id=uuid.uuid4().hex)
 
     result = await lookup_policy(session, privileged_ctx, title="Procurement policy")
@@ -232,7 +232,7 @@ async def test_registry_only_contains_explicit_tool_names():
 @pytest.mark.asyncio
 async def test_authorize_tool_checks_database_not_client_claims(session):
     await seed_demo_users()
-    user = await _get_user_by_email(session, "viewer@cellutech.com")
+    user = await _get_user_by_email(session, "dave@assistant.test")
     thread = await _create_thread(session, user.id)
     ctx = ToolContext(authenticated_user_id=user.id, thread_id=str(thread.id), execution_id=uuid.uuid4().hex)
 

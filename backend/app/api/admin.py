@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.models.user import User
 from app.models.user_capability import UserCapability, display_capability, normalize_capability
 from app.policies.ingestion import chunk_policy_text
 from app.schemas.auth import AdminUserResponse
+from app.schemas.email import EmailAddress
 from app.services.authorization import require_admin
 from app.services.password import hash_password
 
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 class AdminCreateUserRequest(BaseModel):
     """Request payload for creating a user."""
 
-    email: EmailStr
+    email: EmailAddress
     password: str = Field(..., min_length=8)
     is_admin: bool = False
     capabilities: list[str] = Field(default_factory=list)

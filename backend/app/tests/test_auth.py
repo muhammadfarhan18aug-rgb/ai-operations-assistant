@@ -15,17 +15,19 @@ from app.config import get_settings
 from app.main import app
 from app.models.approval import ApprovalRequest
 from app.models.audit_log import AuditLog
+from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.order import Order
 from app.models.product import Product
 from app.models.thread import Thread
 from app.models.user import User
 from app.models.user_capability import UserCapability
-from app.seed.seed import seed_demo_users
+from app.seed.seed import SEED_PRODUCTS, seed_demo_users
 
-ADMIN_EMAIL = "admin@cellutech.com"
-OPS_EMAIL = "ops@cellutech.com"
-MANAGER_EMAIL = "manager@cellutech.com"
-VIEWER_EMAIL = "viewer@cellutech.com"
+ADMIN_EMAIL = "admin@assistant.test"
+OPS_EMAIL = "ali@assistant.test"
+MANAGER_EMAIL = "sara@assistant.test"
+VIEWER_EMAIL = "dave@assistant.test"
 ALL_USER_EMAILS = [ADMIN_EMAIL, OPS_EMAIL, MANAGER_EMAIL, VIEWER_EMAIL]
 
 
@@ -34,9 +36,9 @@ def configure_demo_env(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "this_is_a_very_long_test_secret_key_1234567890")
     monkeypatch.setenv("JWT_EXPIRE_MINUTES", "60")
     monkeypatch.setenv("SEED_ADMIN_PASSWORD", "AdminPassword123!")
-    monkeypatch.setenv("SEED_OPS_PASSWORD", "OpsPassword123!")
-    monkeypatch.setenv("SEED_MANAGER_PASSWORD", "ManagerPassword123!")
-    monkeypatch.setenv("SEED_VIEWER_PASSWORD", "ViewerPassword123!")
+    monkeypatch.setenv("SEED_ALI_PASSWORD", "AliPassword123!")
+    monkeypatch.setenv("SEED_SARA_PASSWORD", "SaraPassword123!")
+    monkeypatch.setenv("SEED_DAVE_PASSWORD", "DavePassword123!")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -49,9 +51,10 @@ def make_session_factory():
 
 @pytest_asyncio.fixture
 async def async_client():
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        yield client
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            yield client
 
 
 @pytest_asyncio.fixture
@@ -59,9 +62,9 @@ async def seeded_users():
     await seed_demo_users()
     return {
         "admin": "AdminPassword123!",
-        "ops": "OpsPassword123!",
-        "manager": "ManagerPassword123!",
-        "viewer": "ViewerPassword123!",
+        "ali": "AliPassword123!",
+        "sara": "SaraPassword123!",
+        "dave": "DavePassword123!",
     }
 
 
@@ -96,9 +99,9 @@ async def test_seed_command_creates_all_four_users_and_capabilities(async_client
 
             expected_capabilities = {
                 ADMIN_EMAIL: {"policy:read", "inventory:read", "order:create", "email:send"},
-                OPS_EMAIL: {"policy:read", "inventory:read", "order:create", "email:send"},
+                OPS_EMAIL: {"policy:read", "inventory:read"},
                 MANAGER_EMAIL: {"policy:read", "inventory:read", "order:create"},
-                VIEWER_EMAIL: {"policy:read", "inventory:read"},
+                VIEWER_EMAIL: set(),
             }
             actual_capabilities = {}
             for user in users:
@@ -113,9 +116,9 @@ async def test_seed_command_creates_all_four_users_and_capabilities(async_client
 
     for email, password in (
         (ADMIN_EMAIL, "AdminPassword123!"),
-        (OPS_EMAIL, "OpsPassword123!"),
-        (MANAGER_EMAIL, "ManagerPassword123!"),
-        (VIEWER_EMAIL, "ViewerPassword123!"),
+        (OPS_EMAIL, "AliPassword123!"),
+        (MANAGER_EMAIL, "SaraPassword123!"),
+        (VIEWER_EMAIL, "DavePassword123!"),
     ):
         assert (await async_client.post("/auth/login", json={"email": email, "password": password})).status_code == 200
 
@@ -123,13 +126,49 @@ async def test_seed_command_creates_all_four_users_and_capabilities(async_client
 @pytest.mark.asyncio
 async def test_seed_command_is_idempotent():
     await seed_demo_users()
-    await seed_demo_users()
     session_factory, engine = make_session_factory()
     try:
         async with session_factory() as session:
-            result = await session.execute(select(User.email).where(User.email.in_(ALL_USER_EMAILS)))
-            emails = set(result.scalars().all())
-            assert emails.issuperset(set(ALL_USER_EMAILS))
+            expected_products = {item["sku"] for item in SEED_PRODUCTS}
+            product_rows = await session.execute(select(Product.sku).where(Product.sku.in_(expected_products)))
+            product_skus = set(product_rows.scalars().all())
+            assert product_skus == expected_products
+            product = await session.scalar(select(Product).where(Product.sku == "SKU-1043"))
+            assert product is not None and product.quantity_on_hand == 120
+
+            expected_documents = {
+                "policy-leave-policy",
+                "policy-expense-reimbursement-policy",
+                "policy-inventory-policy",
+                "policy-procurement-policy",
+            }
+            docs = (
+                await session.execute(
+                    select(Document).where(Document.document_identifier.in_(expected_documents), Document.index_status == "indexed")
+                )
+            ).scalars().all()
+            assert {document.document_identifier for document in docs} == expected_documents
+            chunks = (
+                await session.execute(select(DocumentChunk.id).where(DocumentChunk.document_id.in_([doc.id for doc in docs])))
+            ).scalars().all()
+            assert chunks
+            initial_counts = (len(product_skus), len(docs), len(chunks))
+
+        await seed_demo_users()
+        async with session_factory() as session:
+            repeated_products = await session.execute(select(Product.sku).where(Product.sku.in_(expected_products)))
+            repeated_docs = await session.execute(
+                select(Document).where(Document.document_identifier.in_(expected_documents), Document.index_status == "indexed")
+            )
+            repeated_doc_rows = repeated_docs.scalars().all()
+            repeated_chunks = await session.execute(
+                select(DocumentChunk.id).where(DocumentChunk.document_id.in_([doc.id for doc in repeated_doc_rows]))
+            )
+            assert (
+                len(repeated_products.scalars().all()),
+                len(repeated_doc_rows),
+                len(repeated_chunks.scalars().all()),
+            ) == initial_counts
     finally:
         await engine.dispose()
 
@@ -153,6 +192,9 @@ async def test_correct_password_authenticates(async_client, seeded_users):
     data = response.json()
     assert "access_token" in data
     assert data["token_type"] == "bearer"
+    assert "httponly" in response.headers.get("set-cookie", "").lower()
+    cookie_authenticated = await async_client.get("/auth/me")
+    assert cookie_authenticated.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -164,7 +206,7 @@ async def test_incorrect_password_fails(async_client, seeded_users):
 
 @pytest.mark.asyncio
 async def test_inactive_user_cannot_authenticate(async_client):
-    inactive_email = f"inactive_{uuid.uuid4().hex[:8]}@cellutech.com"
+    inactive_email = f"inactive_{uuid.uuid4().hex[:8]}@assistant.test"
     session_factory, engine = make_session_factory()
     try:
         async with session_factory() as session:
@@ -217,7 +259,7 @@ async def test_auth_me_requires_authentication(async_client, seeded_users):
 
 @pytest.mark.asyncio
 async def test_auth_me_returns_auth_data_without_password_hash(async_client, seeded_users):
-    token = await _login(async_client, VIEWER_EMAIL, "ViewerPassword123!")
+    token = await _login(async_client, VIEWER_EMAIL, "DavePassword123!")
     response = await async_client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     payload = response.json()
@@ -239,7 +281,7 @@ async def test_admin_can_access_admin_users(async_client, seeded_users):
 
 @pytest.mark.asyncio
 async def test_non_admin_cannot_access_admin_users(async_client, seeded_users):
-    token = await _login(async_client, VIEWER_EMAIL, "ViewerPassword123!")
+    token = await _login(async_client, VIEWER_EMAIL, "DavePassword123!")
     response = await async_client.get("/admin/users", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
 
@@ -315,12 +357,12 @@ async def test_seed_command_creates_assistant_demo_users_and_capabilities(async_
 @pytest.mark.asyncio
 async def test_reference_scenario_purchase_order_approval_flow(async_client, seeded_users, session):
     await seed_demo_users()
-    manager = (await session.execute(select(User).where(User.email == "manager@cellutech.com"))).scalar_one()
+    manager = (await session.execute(select(User).where(User.email == "sara@assistant.test"))).scalar_one()
     sku = f"SKU-REF-{uuid.uuid4().hex[:8]}"
     session.add(Product(sku=sku, name="Reference Widget", quantity_on_hand=42, unit_price=10.50, supplier="Acme Supplies"))
     await session.commit()
 
-    token = await _login(async_client, "manager@cellutech.com", "ManagerPassword123!")
+    token = await _login(async_client, "sara@assistant.test", "SaraPassword123!")
     inventory_response = await async_client.post(
         "/chat",
         json={"message": f"Check inventory for {sku}.", "thread_id": None},
@@ -352,7 +394,8 @@ async def test_reference_scenario_purchase_order_approval_flow(async_client, see
             events.setdefault(event_name, []).append(json.loads(data))
 
     assert "status" in events
-    assert "approval" in events
+    assert "approval_required" in events
+    assert {"routing", "final"}.issubset(events)
     payload = events["final"][0]
     assert payload["thread_id"] == thread_id
     assert payload["approval_request"]["required"] is True
@@ -361,13 +404,13 @@ async def test_reference_scenario_purchase_order_approval_flow(async_client, see
     pending = await async_client.get("/approvals/pending", headers={"Authorization": f"Bearer {token}"})
     assert pending.status_code == 200
     assert any(item["id"] == approval_id for item in pending.json())
-    assert events["approval"][0]["approval_id"] == approval_id
+    assert events["approval_required"][0]["approval_id"] == approval_id
 
     approval = await session.get(ApprovalRequest, approval_id)
     assert approval is not None
     assert str(approval.thread_id) == thread_id
     assert approval.status == "PENDING"
-    assert approval.action_args["sku"] == sku
+    assert approval.action_args["sku"] == sku.upper()
     assert approval.action_args["supplier"] == "Acme Supplies"
     assert (await session.execute(select(Order).where(Order.idempotency_key == approval.idempotency_key))).scalar_one_or_none() is None
 
@@ -397,7 +440,7 @@ async def test_reference_scenario_purchase_order_approval_flow(async_client, see
     thread = await session.get(Thread, uuid.UUID(thread_id))
     assert thread is not None
     assert thread.owner_user_id == manager.id
-    assert [message["role"] for message in thread.messages] == ["user", "assistant", "user", "assistant"]
+    assert [message["role"] for message in thread.messages] == ["user", "assistant", "user", "assistant", "assistant"]
     assert thread.messages[0]["content"] == f"Check inventory for {sku}."
 
     duplicate = await async_client.post(
@@ -412,14 +455,14 @@ async def test_reference_scenario_purchase_order_approval_flow(async_client, see
 
 @pytest.mark.asyncio
 async def test_user_without_capability_cannot_pass_require_capability(async_client, seeded_users):
-    token = await _login(async_client, VIEWER_EMAIL, "ViewerPassword123!")
+    token = await _login(async_client, VIEWER_EMAIL, "DavePassword123!")
     response = await async_client.get("/authz/order-test", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_user_with_capability_can_pass_require_capability(async_client, seeded_users):
-    token = await _login(async_client, VIEWER_EMAIL, "ViewerPassword123!")
+    token = await _login(async_client, OPS_EMAIL, "AliPassword123!")
     response = await async_client.get("/authz/inventory-test", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
 
@@ -437,14 +480,14 @@ async def test_capabilities_are_loaded_from_database_not_jwt(async_client, seede
 
 @pytest.mark.asyncio
 async def test_viewer_cannot_obtain_order_create_authorization(async_client, seeded_users):
-    token = await _login(async_client, VIEWER_EMAIL, "ViewerPassword123!")
+    token = await _login(async_client, VIEWER_EMAIL, "DavePassword123!")
     response = await async_client.get("/authz/order-test", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_manager_cannot_obtain_email_send_authorization(async_client, seeded_users):
-    token = await _login(async_client, MANAGER_EMAIL, "ManagerPassword123!")
+    token = await _login(async_client, MANAGER_EMAIL, "SaraPassword123!")
     response = await async_client.get("/authz/email-test", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit_log import AuditLog
 from app.models.email_message import EmailMessage
+from app.schemas.email import EmailAddress
 from app.tools.authorization import ToolAuthorizationError, authorize_tool, ensure_thread_for_context
 from app.tools.context import ToolContext
 
@@ -15,7 +16,7 @@ from app.tools.context import ToolContext
 class EmailSendInput(BaseModel):
     """Validated email-send payload."""
 
-    recipient: EmailStr
+    recipient: EmailAddress
     subject: str = Field(..., min_length=1, max_length=255)
     body: str = Field(..., min_length=1, max_length=5000)
     idempotency_key: str = Field(..., min_length=1, max_length=128)

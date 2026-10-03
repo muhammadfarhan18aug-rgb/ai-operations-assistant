@@ -203,6 +203,116 @@ textarea {
   color: #fca5a5;
 }
 
+.progress-list {
+  margin: 0;
+  padding: 0.8rem 0.8rem 0.8rem 2rem;
+  border-left: 2px solid #38bdf8;
+  color: #cbd5e1;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.admin-panel,
+.admin-form,
+.admin-record-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.admin-form,
+.admin-record {
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.admin-record-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.admin-record-heading,
+.capability-grant {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.admin-record-heading p,
+.admin-record > p {
+  margin-top: 0.25rem;
+  color: #aebccc;
+  overflow-wrap: anywhere;
+}
+
+.admin-record pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: #cbd5e1;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 500;
+}
+
+.check-row input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+}
+
+.capability-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+}
+
+.capability-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.capability-tag button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.capability-grant select {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.approval-fields {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.approval-fields textarea {
+  min-height: 96px;
+}
+
+.approval-actions {
+  flex-wrap: wrap;
+}
+
 @media (max-width: 980px) {
   .workspace-grid {
     grid-template-columns: 1fr;
@@ -211,5 +321,11 @@ textarea {
   .panel-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .admin-record-heading,
+  .capability-grant {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

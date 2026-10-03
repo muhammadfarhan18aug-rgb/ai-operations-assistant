@@ -2,25 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-import psycopg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.config import get_settings
-
-logger = logging.getLogger(__name__)
-
-
-def _configure_windows_event_loop() -> None:
-    if sys.platform == "win32":
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        except AttributeError:
-            pass
-
 
 def _normalize_postgres_url(conn_string: str) -> str:
     normalized = conn_string.strip()
@@ -31,49 +18,15 @@ def _normalize_postgres_url(conn_string: str) -> str:
     return normalized
 
 
-async def create_postgres_checkpointer(conn_string: str | None = None) -> AsyncPostgresSaver | None:
-    """Create and initialize a durable Postgres-backed checkpointer."""
-    _configure_windows_event_loop()
+@asynccontextmanager
+async def open_postgres_checkpointer(
+    conn_string: str | None = None,
+) -> AsyncIterator[AsyncPostgresSaver]:
+    """Open and initialize the durable PostgreSQL checkpointer for an app lifespan."""
     url = _normalize_postgres_url(conn_string or get_settings().database_url)
     if not url.startswith("postgresql://"):
-        return None
+        raise RuntimeError("LangGraph checkpointing requires a PostgreSQL DATABASE_URL.")
 
-    try:
-        connection = await psycopg.AsyncConnection.connect(
-            url,
-            autocommit=True,
-            prepare_threshold=0,
-        )
-        saver = AsyncPostgresSaver(conn=connection)
+    async with AsyncPostgresSaver.from_conn_string(url) as saver:
         await saver.setup()
-        return saver
-    except Exception:
-        logger.warning("Could not initialize Postgres LangGraph checkpoint saver.", exc_info=True)
-        return None
-
-
-def create_default_checkpointer() -> AsyncPostgresSaver | None:
-    """Return a connected Postgres checkpointer when the database is reachable.
-
-    Avoid creating a saver from an already-running event loop. AsyncPostgresSaver binds to a
-    specific loop, and creating it with asyncio.run() inside an ASGI request lifecycle can leave
-    the saver bound to a closed loop and break later async graph execution.
-    """
-    _configure_windows_event_loop()
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            return asyncio.run(create_postgres_checkpointer())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(create_postgres_checkpointer())
-            finally:
-                loop.close()
-        except Exception:
-            logger.warning("Unable to create the default Postgres checkpointer.", exc_info=True)
-            return None
-
-    logger.info("Skipping Postgres checkpointer initialization because the app is already running in an active async loop.")
-    return None
+        yield saver

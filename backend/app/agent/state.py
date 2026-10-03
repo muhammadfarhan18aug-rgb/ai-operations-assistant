@@ -22,3 +22,10 @@ class GraphState(TypedDict):
     action_request: dict[str, Any] | None
     approval_request: dict[str, Any] | None
     error: str | None
+    request_id: str
+    workflow: dict[str, Any] | None
+    inventory_result: dict[str, Any] | None
+    order_result: dict[str, Any] | None
+    email_result: dict[str, Any] | None
+    model_plan: dict[str, Any] | None
+    direct_order: bool

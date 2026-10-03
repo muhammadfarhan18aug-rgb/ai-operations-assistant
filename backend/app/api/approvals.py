@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user
 from app.database import get_db_session
-from app.models.approval import ApprovalRequest
 from app.models.user import User
 from app.schemas.approval import ApprovalDecisionRequest, ApprovalSummary
-from app.services.approvals import approve_approval_request, get_owned_approval, list_pending_approvals_for_user, reject_approval_request
+from app.services.approvals import get_owned_approval, list_pending_approvals_for_user, resume_approval_request
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -67,15 +65,18 @@ async def get_approval(
 
 @router.post("/{approval_id}/approve", response_model=ApprovalSummary)
 async def approve_approval(
+    request: Request,
     approval_id: int,
     payload: ApprovalDecisionRequest | None = None,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ApprovalSummary:
-    approval = await approve_approval_request(
+    approval = await resume_approval_request(
         session,
         current_user=current_user,
+        graph=request.app.state.graph,
         approval_id=approval_id,
+        decision="approve",
         reason=(payload.reason if payload else None),
         action_args=(payload.action_args if payload else None),
     )
@@ -98,15 +99,18 @@ async def approve_approval(
 
 @router.post("/{approval_id}/reject", response_model=ApprovalSummary)
 async def reject_approval(
+    request: Request,
     approval_id: int,
     payload: ApprovalDecisionRequest | None = None,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ApprovalSummary:
-    approval = await reject_approval_request(
+    approval = await resume_approval_request(
         session,
         current_user=current_user,
+        graph=request.app.state.graph,
         approval_id=approval_id,
+        decision="reject",
         reason=(payload.reason if payload else None),
     )
     return ApprovalSummary(

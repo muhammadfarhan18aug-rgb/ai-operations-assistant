@@ -19,7 +19,7 @@ def test_route_message_classifies_action_request() -> None:
     assert route_message(state) == "action"
 
 
-def test_route_message_classifies_knowledge_request() -> None:
+def test_route_message_classifies_inventory_request_as_action() -> None:
     state = {
         "thread_id": "thread-124",
         "user_id": 42,
@@ -31,10 +31,10 @@ def test_route_message_classifies_knowledge_request() -> None:
         "approval_request": None,
         "error": None,
     }
-    assert route_message(state) == "knowledge"
+    assert route_message(state) == "action"
 
 
 def test_build_graph_compiles() -> None:
-    graph = build_graph()
+    graph = build_graph(checkpointer=object())
     assert hasattr(graph, "invoke")
     assert hasattr(graph, "get_state")

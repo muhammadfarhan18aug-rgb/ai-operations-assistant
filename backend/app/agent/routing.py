@@ -28,6 +28,11 @@ def route_message(state: GraphState) -> str:
 
     normalized = latest_text.lower()
 
+    if re.search(r"\b(?:inventory|stock|units on hand|quantity on hand)\b", normalized) and re.search(
+        r"\bSKU[-_][A-Za-z0-9_-]+\b", latest_text, re.IGNORECASE
+    ):
+        return "action"
+
     if re.search(r"\b(?:check|lookup|look up|show)\s+(?:the\s+)?(?:inventory|stock)\b", normalized):
         return "action"
 

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     model_provider: str = ""
     model_name: str = ""
     model_api_key: str = ""
+    model_base_url: str = ""
 
     embedding_provider: str = ""
     embedding_model: str = ""

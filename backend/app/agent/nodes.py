@@ -6,12 +6,19 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from langgraph.config import get_stream_writer
+from langgraph.types import interrupt
+
+from app.agent.model import ModelProviderError, build_chat_model
 from app.agent.state import GraphState
 from app.database import get_db_session
+from app.models.audit_log import AuditLog
+from app.models.user import User
 from app.policies.retrieval import retrieve_policy_context
-from app.services.approvals import requires_human_approval, _extract_tool_args
-from app.tools.authorization import ToolAuthorizationError, authorize_tool
+from app.tools.authorization import ToolAuthorizationError, ToolNotFoundError, authorize_tool
 from app.tools.context import ToolContext
+from app.tools.email import EmailSendInput
+from app.tools.purchase_orders import PurchaseOrderCreateInput
 from app.tools.registry import resolve_tool
 
 
@@ -26,13 +33,44 @@ def _latest_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def classify_message(state: GraphState) -> GraphState:
-    """Add the deterministic route classification into the state."""
+async def classify_message(state: GraphState) -> GraphState:
+    """Use a configured model for structured intent extraction or deterministic fallback."""
     from app.agent.routing import route_message
 
-    route = route_message(state)
-    state["intent"] = route
+    if state.get("direct_order"):
+        state["intent"] = "action"
+        state["model_plan"] = None
+        state["error"] = None
+        return state
+
+    question = _latest_user_text(state.get("messages", []))
+    try:
+        model = build_chat_model()
+        if model is None:
+            state["intent"] = route_message(state)
+            state["model_plan"] = None
+            state["error"] = None
+            return state
+
+        plan = await model.plan_request(question)
+    except ModelProviderError:
+        state["intent"] = "unknown"
+        state["model_plan"] = None
+        state["response"] = "The configured model provider is unavailable. No action was run."
+        state["error"] = "model_provider_failure"
+        return state
+
+    state["intent"] = plan.route
+    state["model_plan"] = plan.model_dump()
+    state["error"] = None
     return state
+
+
+def _emit_progress(event: str, **payload: Any) -> None:
+    try:
+        get_stream_writer()({"event": event, **payload})
+    except RuntimeError:
+        pass
 
 
 async def knowledge_node(state: GraphState) -> GraphState:
@@ -86,6 +124,27 @@ async def knowledge_node(state: GraphState) -> GraphState:
         state["retrieval_status"] = result.retrieval_status
         state["citations"] = [citation["document_title"] for citation in result.citation_metadata]
         state["response"] = result.grounded_answer
+        if result.retrieval_status == "success":
+            try:
+                model = build_chat_model()
+                if model is not None:
+                    sources = [
+                        {"title": citation["document_title"], "section": str(citation.get("section") or ""), "excerpt": chunk}
+                        for citation, chunk in zip(result.citation_metadata, result.retrieved_policy_chunks, strict=False)
+                    ]
+                    answer_parts: list[str] = []
+                    async for delta in model.stream_grounded_answer(question, sources):
+                        answer_parts.append(delta)
+                        _emit_progress("assistant_delta", content=delta, thread_id=thread_id)
+                    if not answer_parts:
+                        raise ModelProviderError("The configured model returned an empty answer.")
+                    sources_text = ", ".join(dict.fromkeys(state["citations"]))
+                    state["grounded_answer"] = f"{''.join(answer_parts)}\n\nSources: {sources_text}"
+                    state["response"] = state["grounded_answer"]
+            except ModelProviderError:
+                state["grounded_answer"] = "The configured model provider could not complete a grounded answer."
+                state["response"] = state["grounded_answer"]
+                state["error"] = "model_provider_failure"
         break
 
     return state
@@ -99,112 +158,306 @@ def _extract_inventory_sku(request_text: str) -> str | None:
     return match.group(1) if match else None
 
 
-async def action_node(state: GraphState) -> GraphState:
-    """Resolve an allowlisted action and execute only authorized read-only lookups."""
+def plan_actions(state: GraphState) -> GraphState:
+    """Build a bounded plan; tool authorization remains independent of model output."""
     request_text = _latest_user_text(state.get("messages", []))
     normalized = request_text.lower()
-
-    if any(keyword in normalized for keyword in ("purchase", "po", "order", "buy")):
-        tool_name = "purchase_order_create"
-    elif any(keyword in normalized for keyword in ("email", "send", "notify", "message")):
-        tool_name = "email_send"
-    elif any(keyword in normalized for keyword in ("inventory", "stock", "sku", "quantity")):
-        tool_name = "inventory_lookup"
-    elif any(keyword in normalized for keyword in ("policy", "procedure", "compliance", "document")):
-        tool_name = "policy_lookup"
+    model_plan = state.get("model_plan")
+    parsed_sku = _extract_inventory_sku(request_text)
+    parsed_order = _extract_explicit_order_args(request_text)
+    if model_plan:
+        sku = str(model_plan.get("sku") or parsed_sku or "") or None
+        requested_quantity = model_plan.get("target_quantity") or _requested_stock_quantity(request_text)
+        wants_order = bool(model_plan.get("wants_order"))
+        wants_email = bool(model_plan.get("wants_email"))
+        needs_inventory = bool(model_plan.get("needs_inventory") and sku)
+        explicit_order = {
+            **parsed_order,
+            **({"sku": model_plan["order_sku"]} if model_plan.get("order_sku") else {}),
+            **({"quantity": model_plan["order_quantity"]} if model_plan.get("order_quantity") is not None else {}),
+            **({"supplier": model_plan["supplier"]} if model_plan.get("supplier") else {}),
+        }
     else:
-        tool_name = "inventory_lookup"
-
+        sku = parsed_sku
+        requested_quantity = _requested_stock_quantity(request_text)
+        wants_order = any(keyword in normalized for keyword in ("purchase order", "raise an order", "raise a purchase", "shortfall", "reorder", "buy"))
+        wants_email = any(keyword in normalized for keyword in ("email", "confirmation", "notify me"))
+        needs_inventory = bool(
+            sku
+            and any(word in normalized for word in ("have", "check", "lookup", "look up", "stock", "inventory", "units"))
+        )
+        explicit_order = parsed_order
+    request_id = state.get("request_id") or uuid4().hex
     state["intent"] = "action"
     state["citations"] = []
     state["action_request"] = {
-        "kind": "explicit_tool_selection",
+        "kind": "sequential_action_plan",
         "prompt": request_text,
-        "status": "pending_authorization",
-        "tool_name": tool_name,
+        "status": "planned",
+        "tool_name": "inventory_lookup" if needs_inventory else "purchase_order_create" if wants_order else "email_send" if wants_email else None,
+    }
+    state["workflow"] = {
+        "sku": sku,
+        "requested_quantity": requested_quantity,
+        "needs_inventory": needs_inventory,
+        "wants_order": wants_order,
+        "wants_email": wants_email,
+        "shortfall": 0,
+        "explicit_order": explicit_order,
+        "request_id": request_id,
+        "requires_order_before_email": wants_order and wants_email,
+    }
+    state["approval_request"] = None
+    state["inventory_result"] = None
+    state["order_result"] = None
+    state["email_result"] = None
+    state["error"] = None
+    _emit_progress("routing", route="action", steps=[name for name, enabled in (("inventory", needs_inventory), ("order", wants_order), ("email", wants_email)) if enabled])
+    if not needs_inventory and not wants_order and not wants_email:
+        state["response"] = "The request did not identify a supported operational action."
+        state["error"] = "request_unclassified"
+        state["action_request"]["status"] = "unsupported"
+    return state
+
+
+def _requested_stock_quantity(request_text: str) -> int | None:
+    match = re.search(r"(?i)\b(\d+)\s+(?:units|items|pieces)\s+of\s+SKU[-_][A-Za-z0-9_-]+", request_text)
+    return int(match.group(1)) if match else None
+
+
+def _extract_explicit_order_args(request_text: str) -> dict[str, Any]:
+    sku = _extract_inventory_sku(request_text)
+    quantity_match = re.search(r"(?i)(?:qty|quantity)\s*[:=]?\s*(-?\d+)", request_text)
+    supplier_match = re.search(r"(?i)(?:supplier|vendor|from)\s*[:=]?\s*([A-Za-z0-9 .&'-]+)", request_text)
+    return {
+        **({"sku": sku} if sku else {}),
+        **({"quantity": int(quantity_match.group(1))} if quantity_match else {}),
+        **({"supplier": supplier_match.group(1).strip().rstrip(".")} if supplier_match else {}),
     }
 
-    if tool_name == "inventory_lookup":
-        sku = _extract_inventory_sku(request_text)
-        user_id = state.get("user_id")
-        thread_id = state.get("thread_id")
-        if not sku or user_id is None or thread_id is None:
-            state["action_request"]["status"] = "invalid_request"
-            state["response"] = "Provide a product SKU to look up inventory."
-            state["error"] = "inventory_lookup_missing_context"
-            state["approval_request"] = {
-                "required": False,
-                "tool_name": tool_name,
-                "status": "not_required",
-                "action_args": {},
-                "reason": "Inventory lookup is read-only.",
-            }
-            return state
 
-        context = ToolContext(authenticated_user_id=user_id, thread_id=thread_id, execution_id=uuid4().hex)
-        try:
-            tool = resolve_tool(tool_name)
-            async for session in get_db_session():
-                result = await tool(session, context, sku=sku)
-                break
-        except ToolAuthorizationError:
-            state["action_request"]["status"] = "denied"
-            state["response"] = "Inventory lookup is not authorized or the requested product was not found."
-            state["error"] = "inventory_lookup_denied"
-            result = None
-        else:
-            state["action_request"]["status"] = "executed"
-            state["action_request"]["result"] = result
-            state["response"] = f"Inventory for {result['sku']}: {result['quantity_on_hand']} units on hand."
-            state["error"] = None
+def _context(state: GraphState) -> ToolContext:
+    return ToolContext(
+        authenticated_user_id=state.get("user_id"),
+        thread_id=state.get("thread_id"),
+        execution_id=str((state.get("workflow") or {}).get("request_id") or uuid4().hex),
+    )
 
-        state["approval_request"] = {
-            "required": False,
-            "tool_name": tool_name,
-            "status": "not_required",
-            "action_args": {"sku": sku},
-            "reason": "Inventory lookup is read-only.",
-        }
-        state["citations"] = []
+
+async def inventory_node(state: GraphState) -> GraphState:
+    workflow = state.get("workflow") or {}
+    sku = workflow.get("sku")
+    if not sku:
+        state["response"] = "Provide a product SKU to look up inventory."
+        state["error"] = "inventory_lookup_missing_sku"
         return state
 
-    requires_approval = requires_human_approval(tool_name)
-    if requires_approval:
-        state["response"] = (
-            "Human approval is required before the dangerous write action can execute. "
-            "The backend is creating a durable approval record for this request."
-        )
-        state["approval_request"] = {
-            "required": True,
-            "tool_name": tool_name,
-            "status": "pending",
-            "action_args": _extract_tool_args(tool_name, request_text),
-            "reason": "Responsible backend policy requires explicit human approval before a write action executes.",
-        }
-    else:
-        state["response"] = (
-            "This request was classified as an operational action, but tool execution remains gated by the "
-            "backend authorization boundary in this foundation step."
-        )
-        state["approval_request"] = {
-            "required": False,
-            "tool_name": tool_name,
-            "status": "not_required",
-            "action_args": {},
-            "reason": "Read-only tool or policy lookup does not require human approval.",
-        }
+    _emit_progress("tool_started", tool="inventory_lookup", arguments={"sku": sku})
+    try:
+        async for session in get_db_session():
+            result = await resolve_tool("inventory_lookup")(session, _context(state), sku=sku)
+            break
+    except ToolAuthorizationError:
+        state["response"] = "Inventory lookup is not authorized or the requested product was not found."
+        state["error"] = "inventory_lookup_denied"
+        state["action_request"] = {**(state.get("action_request") or {}), "status": "denied"}
+        return state
+
+    workflow["shortfall"] = max(0, int(workflow.get("requested_quantity") or 0) - int(result["quantity_on_hand"]))
+    state["workflow"] = workflow
+    state["inventory_result"] = result
+    state["action_request"] = {**(state.get("action_request") or {}), "status": "executed", "result": result}
+    state["response"] = f"Inventory for {result['sku']}: {result['quantity_on_hand']} units on hand."
     state["error"] = None
+    _emit_progress("tool_result", tool="inventory_lookup", result=result)
+    return state
+
+
+async def _preauthorize(state: GraphState, capability: str) -> None:
+    async for session in get_db_session():
+        await authorize_tool(session, _context(state), capability)
+        break
+
+
+async def _record_audit(state: GraphState, tool: str, args: dict[str, Any], outcome: str) -> None:
+    async for session in get_db_session():
+        session.add(AuditLog(
+            user_id=int(state["user_id"]),
+            tool=tool,
+            arguments={**args, "thread_id": state["thread_id"]},
+            outcome=outcome,
+            thread_id=str(state["thread_id"]),
+        ))
+        await session.commit()
+        break
+
+
+async def order_approval_node(state: GraphState) -> GraphState:
+    workflow = state.get("workflow") or {}
+    inventory = state.get("inventory_result") or {}
+    explicit = workflow.get("explicit_order") or {}
+    quantity = int(workflow.get("shortfall") or explicit.get("quantity") or 0)
+    args = {
+        "sku": str(explicit.get("sku") or inventory.get("sku") or workflow.get("sku") or ""),
+        "quantity": quantity,
+        "supplier": str(explicit.get("supplier") or inventory.get("supplier") or ""),
+    }
+    key = f"po-{workflow.get('request_id')}"
+    try:
+        await _preauthorize(state, "order:create")
+        validated = PurchaseOrderCreateInput(**args, idempotency_key=key)
+    except ToolAuthorizationError:
+        state["response"] = "Purchase order creation is not authorized for this account."
+        state["error"] = "order_create_denied"
+        state["action_request"] = {**(state.get("action_request") or {}), "status": "denied"}
+        return state
+    except Exception as exc:
+        state["response"] = f"The purchase order draft is invalid: {exc}"
+        state["error"] = "order_draft_invalid"
+        return state
+
+    draft = {"sku": validated.sku, "quantity": validated.quantity, "supplier": validated.supplier}
+    state["approval_request"] = {"required": True, "tool_name": "purchase_order_create", "status": "pending", "action_args": draft}
+    decision_payload = {
+        "tool": "purchase_order_create",
+        "action_args": draft,
+        "idempotency_key": key,
+        "description": f"Create a purchase order for {validated.quantity} units of {validated.sku} from {validated.supplier}.",
+    }
+    decision = interrupt(decision_payload)
+    while True:
+        if not isinstance(decision, dict) or decision.get("decision") != "approve":
+            reason = str(decision.get("reason") or "Rejected by human operator.") if isinstance(decision, dict) else "Rejected by human operator."
+            rejected_args = decision.get("action_args", draft) if isinstance(decision, dict) else draft
+            await _record_audit(state, "purchase_order_create", rejected_args, "rejected")
+            state["approval_request"] = {"required": True, "tool_name": "purchase_order_create", "status": "REJECTED", "action_args": rejected_args}
+            state["action_request"] = {**(state.get("action_request") or {}), "status": "rejected"}
+            state["response"] = f"Purchase order rejected. No order was created. {reason}"
+            return state
+
+        edited = decision.get("action_args") or draft
+        validated = PurchaseOrderCreateInput(**edited, idempotency_key=key)
+        _emit_progress("tool_started", tool="purchase_order_create", arguments=edited)
+        try:
+            async for session in get_db_session():
+                result = await resolve_tool("purchase_order_create")(
+                    session,
+                    _context(state),
+                    sku=validated.sku,
+                    quantity=validated.quantity,
+                    supplier=validated.supplier,
+                    idempotency_key=key,
+                )
+                break
+        except ToolNotFoundError as exc:
+            message = f"The purchase order could not be created: {exc} Correct the SKU and submit the approval again."
+            decision_payload = {
+                "tool": "purchase_order_create",
+                "action_args": {"sku": validated.sku, "quantity": validated.quantity, "supplier": validated.supplier},
+                "idempotency_key": key,
+                "validation_error": str(exc),
+                "description": message,
+            }
+            state["approval_request"] = {
+                "required": True,
+                "tool_name": "purchase_order_create",
+                "status": "pending",
+                "action_args": decision_payload["action_args"],
+            }
+            state["response"] = message
+            state["error"] = "order_product_not_found"
+            _emit_progress("tool_result", tool="purchase_order_create", result={"error": str(exc)})
+            decision = interrupt(decision_payload)
+            continue
+        except ToolAuthorizationError:
+            state["response"] = "Purchase order creation is no longer authorized for this account."
+            state["error"] = "order_create_denied"
+            state["action_request"] = {**(state.get("action_request") or {}), "status": "denied"}
+            return state
+        break
+
+    state["order_result"] = result
+    state["approval_request"] = {"required": True, "tool_name": "purchase_order_create", "status": "EXECUTED", "action_args": edited}
+    state["action_request"] = {**(state.get("action_request") or {}), "status": "executed", "result": result}
+    state["response"] = f"Purchase order {result['order_reference']} was created for {result['quantity']} units of {result['sku']}."
+    state["error"] = None
+    _emit_progress("tool_result", tool="purchase_order_create", result=result)
+    return state
+
+
+async def email_approval_node(state: GraphState) -> GraphState:
+    workflow = state.get("workflow") or {}
+    order = state.get("order_result") or {}
+    recipient_match = re.search(r"(?i)\b(?:to|email)\s+([A-Z0-9_.+-]+@[A-Z0-9.-]+)", _latest_user_text(state.get("messages", [])))
+    recipient = recipient_match.group(1) if recipient_match else None
+    if recipient is None:
+        async for session in get_db_session():
+            user = await session.get(User, state.get("user_id"))
+            recipient = user.email if user else ""
+            break
+    order_reference = str(order.get("order_reference") or "")
+    subject = f"Purchase order confirmation: {order_reference}" if order_reference else "Operations confirmation"
+    body = f"Purchase order {order_reference} was created for {order.get('quantity')} units of {order.get('sku')}." if order_reference else "Your requested operation is complete."
+    args = {"recipient": recipient, "subject": subject, "body": body}
+    key = f"email-{workflow.get('request_id')}"
+    try:
+        await _preauthorize(state, "email:send")
+        validated = EmailSendInput(**args, idempotency_key=key)
+    except ToolAuthorizationError:
+        state["response"] = "The purchase order was created, but email confirmation was not sent because this account lacks email permission."
+        state["error"] = "email_send_denied"
+        state["action_request"] = {**(state.get("action_request") or {}), "status": "email_denied"}
+        return state
+    except Exception as exc:
+        state["response"] = f"The email draft is invalid: {exc}"
+        state["error"] = "email_draft_invalid"
+        return state
+
+    draft = {"recipient": str(validated.recipient), "subject": validated.subject, "body": validated.body}
+    state["approval_request"] = {"required": True, "tool_name": "email_send", "status": "pending", "action_args": draft}
+    decision = interrupt({
+        "tool": "email_send",
+        "action_args": draft,
+        "idempotency_key": key,
+        "description": f"Send the purchase order confirmation to {validated.recipient}.",
+    })
+    if not isinstance(decision, dict) or decision.get("decision") != "approve":
+        reason = str(decision.get("reason") or "Rejected by human operator.") if isinstance(decision, dict) else "Rejected by human operator."
+        await _record_audit(state, "email_send", draft, "rejected")
+        state["approval_request"] = {"required": True, "tool_name": "email_send", "status": "REJECTED", "action_args": draft}
+        state["response"] = f"Email rejected. No email was sent. {reason}"
+        return state
+
+    edited = decision.get("action_args") or draft
+    validated = EmailSendInput(**edited, idempotency_key=key)
+    _emit_progress("tool_started", tool="email_send", arguments=draft)
+    async for session in get_db_session():
+        result = await resolve_tool("email_send")(
+            session,
+            _context(state),
+            recipient=str(validated.recipient),
+            subject=validated.subject,
+            body=validated.body,
+            idempotency_key=key,
+        )
+        break
+    state["email_result"] = result
+    state["approval_request"] = {"required": True, "tool_name": "email_send", "status": "EXECUTED", "action_args": edited}
+    state["response"] = f"Email confirmation was sent to {result['recipient']}."
+    state["error"] = None
+    _emit_progress("tool_result", tool="email_send", result=result)
     return state
 
 
 def unknown_node(state: GraphState) -> GraphState:
     """Fallback route used when the request cannot be safely classified."""
     state["intent"] = "unknown"
-    state["response"] = (
-        "The request could not be safely classified. Please rephrase it as a question or an explicit action."
-    )
+    if state.get("error") != "model_provider_failure":
+        state["response"] = (
+            "The request could not be safely classified. Please rephrase it as a question or an explicit action."
+        )
+        state["error"] = "request_unclassified"
     state["citations"] = []
     state["action_request"] = None
     state["approval_request"] = None
-    state["error"] = "request_unclassified"
     return state
