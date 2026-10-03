@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/ai_operations"
     jwt_secret: str = "change_this_in_development"
     jwt_expire_minutes: int = 60
+    seed_admin_password: str = ""
+    seed_ops_password: str = ""
+    seed_manager_password: str = ""
+    seed_viewer_password: str = ""
 
     model_provider: str = ""
     model_name: str = ""
@@ -36,6 +40,14 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def validate_jwt_secret(cls, value: str, info: Any) -> str:
+        if info.data.get("app_env", "development") not in {"development", "test"}:
+            if not value or value == "change_this_in_development":
+                raise ValueError("JWT_SECRET must be set to a secure value outside development.")
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
