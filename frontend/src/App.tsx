@@ -1,10 +1,11 @@
-function App() {
+export default function App() {
   return (
-    <main className="app">
-      <h1>AI Operations Assistant</h1>
-      <p>Project foundation is running.</p>
+    <main className="app-shell">
+      <section className="card">
+        <p className="eyebrow">Foundation status</p>
+        <h1>AI Operations Assistant</h1>
+        <p className="subtitle">Project foundation is running.</p>
+      </section>
     </main>
-  );
+  )
 }
-
-export default App;

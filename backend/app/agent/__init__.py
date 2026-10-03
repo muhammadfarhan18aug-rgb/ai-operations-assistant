@@ -1,1 +1,1 @@
-"""Agent orchestration package. LangGraph / agent logic will be added later."""
+"""Agent package placeholder for future AI workflow work."""

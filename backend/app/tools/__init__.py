@@ -1,1 +1,1 @@
-"""Agent tools package. Tool implementations will be added in later steps."""
+"""Tool package placeholder for future integrations."""

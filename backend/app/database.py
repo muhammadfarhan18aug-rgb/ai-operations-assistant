@@ -1,31 +1,24 @@
-"""SQLAlchemy engine and session helpers."""
+"""SQLAlchemy async database helpers."""
 
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
 
 
 class Base(DeclarativeBase):
-    """Declarative base for ORM models (none defined in this foundation step)."""
+    """Base class for all SQLAlchemy ORM models."""
 
 
 settings = get_settings()
 
-engine = create_engine(
-    settings.database_url,
-    pool_pre_ping=True,
-)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
-def get_db() -> Generator[Session, None, None]:
-    """Yield a database session for FastAPI dependencies."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an async database session for FastAPI dependencies."""
+    async with AsyncSessionLocal() as session:
+        yield session

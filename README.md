@@ -1,120 +1,177 @@
 # AI Operations Assistant
 
-Operations assistant for internal teams: foundation for a FastAPI backend, React frontend, and PostgreSQL datastore.
+AI Operations Assistant is a foundation project for a backend-powered operations assistant platform. This step establishes the clean monorepo structure, configuration, environment setup, health endpoint, database wiring, and frontend shell without implementing authentication, AI workflows, or operational product features yet.
 
-## Implementation Status
+## Technology stack
 
-**Project foundation only.**
+- Backend: Python 3.11+, FastAPI, Pydantic Settings, SQLAlchemy 2.x, Alembic, asyncpg
+- Frontend: React, TypeScript, Vite
+- Database: PostgreSQL (local installation, not Dockerized)
 
-This repository currently includes the monorepo layout, a runnable FastAPI health endpoint, SQLAlchemy/Alembic wiring, Docker Compose for PostgreSQL, and a minimal React + Vite + TypeScript frontend shell. Authentication, domain models, agent/RAG features, tools, chat UI, and admin panels are not implemented yet.
+## Project structure
 
-## Technology Stack
+```text
+ai-operations-assistant/
+├── backend/
+│   ├── alembic/
+│   ├── app/
+│   ├── tests/
+│   ├── alembic.ini
+│   ├── pytest.ini
+│   ├── requirements.txt
+│   └── .venv/  (local virtual environment; git-ignored)
+├── frontend/
+├── .env.example
+├── .gitignore
+├── README.md
+└── .venv/      (project-level virtual environment; git-ignored)
+```
 
-| Layer | Stack |
-| --- | --- |
-| Backend | Python 3.11+, FastAPI, Pydantic, SQLAlchemy, Alembic |
-| Frontend | React, TypeScript, Vite |
-| Database | PostgreSQL 16 (Docker Compose) |
+## Prerequisites
 
-## Environment Setup
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL installed locally on the developer machine
+- Git
 
-1. Copy the example env file (do not commit real secrets):
+## Local PostgreSQL requirement
+
+This project does not use Docker. PostgreSQL is expected to be installed and running locally on the machine. The application connects through the `DATABASE_URL` environment variable, which should target a local PostgreSQL instance.
+
+### Create the PostgreSQL database
+
+After PostgreSQL is installed and started locally, create a database such as:
+
+```bash
+createdb ai_operations
+```
+
+Or with psql:
+
+```bash
+psql -U postgres -d postgres -c "CREATE DATABASE ai_operations;"
+```
+
+## Python virtual environment
+
+From the project root:
+
+```bash
+python -m venv .venv
+```
+
+Activate it:
+
+- Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+- Windows Command Prompt:
+
+```cmd
+.venv\Scripts\activate.bat
+```
+
+- macOS / Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+## Backend installation
+
+```bash
+cd backend
+pip install -r requirements.txt
+```
+
+## Configure environment variables
+
+Copy the example environment file:
+
+```bash
+copy .env.example .env
+```
+
+On macOS / Linux:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Adjust values in `.env` as needed. Important placeholders:
+Then update the values in `.env` for your local PostgreSQL and local development settings.
+
+Required variables include:
 
 - `DATABASE_URL`
-- `JWT_SECRET` / `JWT_EXPIRE_MINUTES`
-- `MODEL_PROVIDER` / `MODEL_NAME` / `MODEL_API_KEY`
-- `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY`
+- `JWT_SECRET`
+- `JWT_EXPIRE_MINUTES`
+- `MODEL_PROVIDER`
+- `MODEL_NAME`
+- `MODEL_API_KEY`
+- `EMBEDDING_PROVIDER`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_API_KEY`
 - `CORS_ORIGINS`
 
-## Database Setup
+## Alembic
 
-Start PostgreSQL with Docker Compose from the repo root:
-
-```bash
-docker compose up -d
-```
-
-Confirm the container is healthy:
-
-```bash
-docker compose ps
-```
-
-## Backend Setup
-
-```bash
-cd backend
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-Ensure a `.env` exists at the repo root (copied from `.env.example`).
-
-### Run backend
-
-From `backend/` with the virtualenv active:
-
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Health endpoint
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected response:
-
-```json
-{"status":"ok","service":"AI Operations Assistant"}
-```
-
-### Alembic
-
-From `backend/` with the virtualenv active and PostgreSQL running:
+From the `backend` directory with the virtual environment active:
 
 ```bash
 alembic current
 ```
 
-This verifies Alembic can connect. No application migrations are required for this foundation step.
+Additional verification:
 
-## Frontend Setup
+```bash
+alembic check
+```
+
+This foundation intentionally has no business-model migrations yet, so the expected result is a successful connection check without fake migration history.
+
+## Start FastAPI
+
+From the project root with the virtual environment active:
+
+```bash
+cd backend
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## Frontend installation
 
 ```bash
 cd frontend
 npm install
 ```
 
-### Run frontend
+## Start React frontend
 
 ```bash
 npm run dev
 ```
 
-Open the URL Vite prints (typically `http://localhost:5173`). The page should show **AI Operations Assistant**.
+The Vite dev server will print a local URL such as `http://localhost:5173`.
 
-## Project Layout
+## Health endpoint
 
-```text
-ai-operations-assistant/
-  backend/          # FastAPI application
-  frontend/         # React + Vite + TypeScript
-  docker-compose.yml
-  .env.example
-  README.md
+The backend exposes:
+
+```http
+GET /health
 ```
+
+Example response:
+
+```json
+{"status": "ok"}
+```
+
+## Current implementation status
+
+Current status: project foundation only.
+
+This project does not yet implement authentication, AI agents, RAG, tools, approvals, admin features, or the chat system. The current step is limited to a clean project foundation that is ready for future extension.

@@ -1,15 +1,14 @@
-"""Health endpoint tests."""
-
 from fastapi.testclient import TestClient
 
 from app.main import app
 
+
 client = TestClient(app)
 
 
-def test_health_returns_ok() -> None:
+def test_health_endpoint() -> None:
+    """The health endpoint should be available and return the expected payload."""
     response = client.get("/health")
+
     assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "ok"
-    assert payload["service"] == "AI Operations Assistant"
+    assert response.json() == {"status": "ok"}

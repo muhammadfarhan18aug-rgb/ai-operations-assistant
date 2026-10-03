@@ -4,48 +4,28 @@
 !.env.example
 
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
 .venv/
 venv/
-env/
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
-
-# Testing / coverage
+**/__pycache__/
+**/*.py[cod]
 .pytest_cache/
 .coverage
 htmlcov/
-.tox/
-.mypy_cache/
-.ruff_cache/
+*.tsbuildinfo
 
 # Node / frontend
 node_modules/
-frontend/dist/
-frontend/build/
-*.local
+dist/
+build/
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # IDE
-.idea/
 .vscode/
-*.swp
-*.swo
-*~
+.idea/
 
 # OS
 .DS_Store
-Thumbs.db
-Desktop.ini
 
-# Logs / misc
+# Logs
 *.log
-logs/
-.cache/
-coverage/

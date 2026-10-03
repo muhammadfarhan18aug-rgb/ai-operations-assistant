@@ -1,37 +1,30 @@
 """Application settings loaded from environment variables."""
 
+import ast
 from functools import lru_cache
-from typing import List
+from typing import Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration. Secrets and credentials come from the environment."""
+    """Runtime configuration for the backend service."""
 
     model_config = SettingsConfigDict(
-        env_file=("../.env", ".env"),
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        # Allow MODEL_* env fields without colliding with Pydantic's model_ namespace.
         protected_namespaces=(),
     )
 
     app_name: str = "AI Operations Assistant"
     app_env: str = "development"
-    debug: bool = True
+    debug: bool = False
 
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-    cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-
-    database_url: str = (
-        "postgresql+psycopg2://postgres:postgres@localhost:5432/ai_operations_assistant"
-    )
-
-    jwt_secret: str = "change-me"
+    database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/ai_operations"
+    jwt_secret: str = "change_this_in_development"
     jwt_expire_minutes: int = 60
 
     model_provider: str = ""
@@ -42,20 +35,27 @@ class Settings(BaseSettings):
     embedding_model: str = ""
     embedding_api_key: str = ""
 
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+
     @field_validator("cors_origins", mode="before")
     @classmethod
-    def parse_cors_origins(cls, value: object) -> object:
+    def parse_cors_origins(cls, value: Any) -> Any:
         if isinstance(value, str):
             raw = value.strip()
             if not raw:
                 return []
             if raw.startswith("["):
-                return value
+                try:
+                    parsed = ast.literal_eval(raw)
+                    if isinstance(parsed, list):
+                        return [str(origin).strip() for origin in parsed if str(origin).strip()]
+                except (ValueError, SyntaxError):
+                    pass
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
         return value
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return a cached Settings instance."""
+    """Return the cached application settings."""
     return Settings()
