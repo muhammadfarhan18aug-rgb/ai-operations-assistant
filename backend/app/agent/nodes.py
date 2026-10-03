@@ -42,22 +42,36 @@ def knowledge_node(state: GraphState) -> GraphState:
 
 
 def action_node(state: GraphState) -> GraphState:
-    """Action branch placeholder that never executes live operations."""
+    """Action branch that resolves to an explicit allowlisted tool name without executing it."""
     request_text = _latest_user_text(state.get("messages", []))
+    normalized = request_text.lower()
+
+    if any(keyword in normalized for keyword in ("inventory", "stock", "sku", "quantity")):
+        tool_name = "inventory_lookup"
+    elif any(keyword in normalized for keyword in ("purchase", "po", "order", "buy")):
+        tool_name = "purchase_order_create"
+    elif any(keyword in normalized for keyword in ("email", "send", "notify", "message")):
+        tool_name = "email_send"
+    elif any(keyword in normalized for keyword in ("policy", "procedure", "compliance", "document")):
+        tool_name = "policy_lookup"
+    else:
+        tool_name = "inventory_lookup"
+
     state["intent"] = "action"
     state["response"] = (
-        "This request was classified as an operational action, but the operational action layer "
-        "is intentionally not implemented in this foundation step."
+        "This request was classified as an operational action, but tool execution remains gated by the "
+        "backend authorization boundary in this foundation step."
     )
     state["citations"] = []
     state["action_request"] = {
-        "kind": "pending_authorization",
+        "kind": "explicit_tool_selection",
         "prompt": request_text,
-        "status": "blocked",
+        "status": "pending_authorization",
+        "tool_name": tool_name,
     }
     state["approval_request"] = {
         "required": True,
-        "reason": "Future tool execution is intentionally withheld in this foundation step.",
+        "reason": "Tool execution is intentionally blocked until the backend authorization boundary approves it.",
     }
     state["error"] = None
     return state

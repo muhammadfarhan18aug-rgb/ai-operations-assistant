@@ -1,7 +1,6 @@
 """Application settings loaded from environment variables."""
 
 import ast
-from functools import lru_cache
 from typing import Any
 
 from pydantic import Field, field_validator
@@ -67,7 +66,14 @@ class Settings(BaseSettings):
         return value
 
 
-@lru_cache
 def get_settings() -> Settings:
-    """Return the cached application settings."""
+    """Return settings from the current environment without freezing stale values."""
     return Settings()
+
+
+def _clear_settings_cache() -> None:
+    """Compatibility shim for tests that call get_settings.cache_clear()."""
+    return None
+
+
+get_settings.cache_clear = _clear_settings_cache
